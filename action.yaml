@@ -1,0 +1,176 @@
+name: 'ArgoCD App'
+description: 'Drive the ArgoCD API (app set / diff / wait) natively in JavaScript - no argocd CLI required.'
+author: 'eldhugr'
+
+branding:
+  icon: 'cloud-lightning'
+  color: 'orange'
+
+inputs:
+  command:
+    description: 'Sub-command to run: set | diff | sync | wait | deploy | get | rollback | history | terminate-op'
+    required: true
+  application:
+    description: 'Application name (e.g. app.stage.comments). Required for all commands except `deploy` when `applications` is provided.'
+    required: false
+
+  # --- Connection / auth (fall back to standard ARGOCD_* env vars when unset) ---
+  server:
+    description: 'ArgoCD server host, with or without scheme (defaults to $ARGOCD_SERVER)'
+    required: false
+  auth-method:
+    description: 'Authentication method: token | password | oidc. When unset, it is inferred (token, then username/password, then OIDC if an ID token is available).'
+    required: false
+  auth-token:
+    description: 'Bearer auth token (defaults to $ARGOCD_AUTH_TOKEN)'
+    required: false
+  username:
+    description: 'Username for password login (defaults to $ARGOCD_USERNAME). Used only when no auth-token is provided.'
+    required: false
+  password:
+    description: 'Password for password login (defaults to $ARGOCD_PASSWORD).'
+    required: false
+
+  # --- OIDC (GitHub Actions token federation; requires `permissions: id-token: write`) ---
+  oidc-audience:
+    description: 'Audience for the requested GitHub OIDC ID token. Leave empty to use the default audience.'
+    required: false
+  oidc-client-id:
+    description: 'Dex/OIDC client id used for the token exchange (auth-method: oidc)'
+    required: false
+    default: 'argo-cd-cli'
+  oidc-connector-id:
+    description: 'Dex connector id configured for GitHub Actions on the ArgoCD server (auth-method: oidc)'
+    required: false
+    default: 'github-actions'
+  insecure:
+    description: 'Skip TLS certificate verification (defaults to $ARGOCD_INSECURE)'
+    required: false
+    default: 'false'
+  app-namespace:
+    description: 'Namespace of the Application CR (appNamespace query param), for apps in any namespace'
+    required: false
+
+  # --- set ---
+  parameters:
+    description: 'Newline-separated Helm parameters to set, each as name=value (command: set)'
+    required: false
+  source-name:
+    description: 'For multi-source apps: the source name to apply parameters to (command: set)'
+    required: false
+  source-position:
+    description: 'For multi-source apps: 1-based source index to apply parameters to (command: set)'
+    required: false
+
+  # --- sync (also applied to the sync step of `deploy`) ---
+  prune:
+    description: 'Prune resources that are no longer defined in Git (command: sync, deploy, rollback)'
+    required: false
+    default: 'false'
+  force:
+    description: 'Force apply (kubectl apply --force) during sync (command: sync, deploy)'
+    required: false
+    default: 'false'
+  replace:
+    description: 'Use kubectl replace/create instead of apply (sync option Replace=true) (command: sync, deploy)'
+    required: false
+    default: 'false'
+  server-side:
+    description: 'Use server-side apply (sync option ServerSideApply=true) (command: sync, deploy)'
+    required: false
+    default: 'false'
+  apply-out-of-sync-only:
+    description: 'Only apply resources that are out of sync (sync option ApplyOutOfSyncOnly=true) (command: sync, deploy)'
+    required: false
+    default: 'false'
+  sync-options:
+    description: 'Additional sync options, one per line or comma-separated, each as Name=value (e.g. CreateNamespace=true) (command: sync, deploy)'
+    required: false
+  strategy:
+    description: 'Sync strategy: "apply" (default) or "hook" (command: sync, deploy)'
+    required: false
+  dry-run:
+    description: 'Perform a dry run without applying changes (command: sync, rollback)'
+    required: false
+    default: 'false'
+  revision:
+    description: 'Target Git revision to sync to (command: sync), or the history revision to roll back to (command: rollback)'
+    required: false
+
+  # --- diff ---
+  refresh:
+    description: 'Refresh the app before diff/wait: "false" | "normal" | "hard" (command: diff, wait)'
+    required: false
+    default: 'normal'
+  fail-on-diff:
+    description: 'If true, the diff command fails the step when differences are found (command: diff)'
+    required: false
+    default: 'false'
+
+  # --- wait ---
+  timeout:
+    description: 'Seconds to wait for the app to become Synced/Healthy (command: wait)'
+    required: false
+    default: '600'
+  wait-for-sync:
+    description: 'Wait for sync status to be Synced (command: wait)'
+    required: false
+    default: 'true'
+  wait-for-health:
+    description: 'Wait for health status to be Healthy (command: wait)'
+    required: false
+    default: 'true'
+  wait-for-operation:
+    description: 'Wait for any in-flight sync operation to finish (command: wait, deploy)'
+    required: false
+    default: 'true'
+
+  # --- deploy ---
+  applications:
+    description: 'List of application names to deploy with the same settings - a JSON array of names (e.g. ["app.stage.comments","app.dev.comments"]) or a newline/comma-separated list. Takes precedence over `application` (command: deploy)'
+    required: false
+  restart:
+    description: 'When there is no rendered diff, restart these workloads instead of doing nothing. `false` (default, off) or an explicit kind / comma-separated kinds, e.g. `Deployment`, `StatefulSet`, or `Deployment,StatefulSet` (command: deploy)'
+    required: false
+    default: 'false'
+  parallel:
+    description: 'Deploy multiple applications concurrently instead of sequentially. Set to false to deploy one at a time (command: deploy)'
+    required: false
+    default: 'true'
+  fail-fast:
+    description: 'Stop after the first failing application in sequential mode (command: deploy). Ignored when allow-failure is true.'
+    required: false
+    default: 'true'
+  allow-failure:
+    description: 'Do not fail the job when some applications fail to deploy - still deploy the rest and report status. Implies fail-fast=false (command: deploy)'
+    required: false
+    default: 'false'
+
+  # --- rollback ---
+  rollback-id:
+    description: 'Deployment history id to roll back to. When omitted, `revision` is used to find the entry, else the previous deployment is used (command: rollback)'
+    required: false
+
+outputs:
+  diff:
+    description: '"true" when the diff command found differences, otherwise "false"'
+  sync-status:
+    description: 'Last observed sync status (e.g. Synced, OutOfSync)'
+  health-status:
+    description: 'Last observed health status (e.g. Healthy, Progressing, Degraded)'
+  revision:
+    description: 'Synced revision of the application'
+  images:
+    description: 'JSON array of container images currently deployed (command: get)'
+  history:
+    description: 'JSON array of deployment history entries: {id, revision, deployedAt, ...} (command: get, history)'
+  results:
+    description: 'JSON array of per-application deploy results: {app, diff, action, syncStatus, healthStatus, revision} or {app, error} (command: deploy)'
+  outcome:
+    description: '`success` (all deployed), `partial` (some failed), or `failure` (all failed) (command: deploy)'
+  failed:
+    description: 'JSON array of application names that failed to deploy (command: deploy)'
+
+runs:
+  using: 'node24'
+  main: 'dist/index.js'
