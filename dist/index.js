@@ -30088,11 +30088,15 @@ function buildSyncBody({
   if (revision) body.revision = revision;
 
   // Boolean conveniences map onto the same string sync options the CLI sends.
+  // They are appended *after* the raw `syncOptions` so that, on a duplicate key,
+  // the explicit flag wins (consolidateSyncOptions keeps the last value per key).
   const options = [...syncOptions];
   if (replace) options.push('Replace=true');
   if (serverSide) options.push('ServerSideApply=true');
   if (applyOutOfSyncOnly) options.push('ApplyOutOfSyncOnly=true');
-  if (options.length > 0) body.syncOptions = { items: options };
+  const consolidated = consolidateSyncOptions(options);
+  warnUnknownSyncOptions(consolidated);
+  if (consolidated.length > 0) body.syncOptions = { items: consolidated };
 
   // `force` and an explicit strategy both require a strategy block. ArgoCD
   // defaults to "apply"; "hook" runs the sync via resource hooks instead.
@@ -30101,6 +30105,64 @@ function buildSyncBody({
     body.strategy = { [kind]: force ? { force: true } : {} };
   }
   return body
+}
+
+/**
+ * Consolidate a `Name=value` sync-option list so the same option can't be sent
+ * twice (e.g. `server-side: true` *and* `sync-options: ServerSideApply=true`).
+ * Duplicate keys collapse to a single entry keeping the **last** value, so the
+ * boolean flags — appended last by buildSyncBody — win over the same option
+ * given as a raw string. Exact duplicates are dropped silently; a genuine value
+ * conflict for one key is surfaced as a warning. Insertion order is preserved.
+ */
+function consolidateSyncOptions(options) {
+  const byKey = new Map();
+  for (const opt of options) {
+    const eq = opt.indexOf('=');
+    const key = eq === -1 ? opt : opt.slice(0, eq);
+    const prev = byKey.get(key);
+    if (prev !== undefined && prev !== opt) {
+      warning(`Conflicting sync option "${key}": "${prev}" overridden by "${opt}".`);
+    }
+    byKey.set(key, opt);
+  }
+  return [...byKey.values()]
+}
+
+/**
+ * ArgoCD's recognised sync-option keys (the `Name` in a `Name=value` entry).
+ * Used only to warn on a likely typo in the free-form `sync-options` input - the
+ * keys the `replace`/`server-side`/`apply-out-of-sync-only` flags emit are
+ * included so flag-derived options never trip the check.
+ */
+const KNOWN_SYNC_OPTIONS = new Set([
+  'Validate',
+  'CreateNamespace',
+  'PrunePropagationPolicy',
+  'PruneLast',
+  'ApplyOutOfSyncOnly',
+  'RespectIgnoreDifferences',
+  'ServerSideApply',
+  'FailOnSharedResource',
+  'Replace'
+]);
+
+/**
+ * Warn (don't fail) on sync-option keys ArgoCD doesn't recognise - this recovers
+ * some type-safety for the free-form `sync-options` escape hatch by catching
+ * typos like `ServerSideAply=true`. It only warns, since ArgoCD may add options
+ * this list doesn't know yet.
+ */
+function warnUnknownSyncOptions(options) {
+  for (const opt of options) {
+    const eq = opt.indexOf('=');
+    const key = eq === -1 ? opt : opt.slice(0, eq);
+    if (!KNOWN_SYNC_OPTIONS.has(key)) {
+      warning(
+        `Unknown sync option "${key}" - check for a typo. Known options: ${[...KNOWN_SYNC_OPTIONS].join(', ')}.`
+      );
+    }
+  }
 }
 
 /** Read the sync options shared by the `sync` and `deploy` commands. */

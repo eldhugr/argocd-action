@@ -1,5 +1,10 @@
-import { describe, expect, it } from '@jest/globals'
-import { buildSyncBody } from '../src/commands/sync.js'
+import { jest, describe, expect, it } from '@jest/globals'
+import * as core from '../__fixtures__/core.js'
+
+jest.unstable_mockModule('@actions/core', () => core)
+
+const { buildSyncBody, consolidateSyncOptions, warnUnknownSyncOptions } =
+  await import('../src/commands/sync.js')
 
 describe('buildSyncBody', () => {
   it('is empty for default options', () => {
@@ -54,5 +59,65 @@ describe('buildSyncBody', () => {
     expect(buildSyncBody({ strategy: 'hook', force: true })).toEqual({
       strategy: { hook: { force: true } }
     })
+  })
+
+  it('drops a duplicate produced by a flag and the same raw option', () => {
+    const body = buildSyncBody({
+      syncOptions: ['ServerSideApply=true'],
+      serverSide: true
+    })
+    expect(body.syncOptions.items).toEqual(['ServerSideApply=true'])
+  })
+
+  it('lets the boolean flag override a conflicting raw option', () => {
+    const body = buildSyncBody({
+      syncOptions: ['ServerSideApply=false'],
+      serverSide: true
+    })
+    expect(body.syncOptions.items).toEqual(['ServerSideApply=true'])
+  })
+})
+
+describe('consolidateSyncOptions', () => {
+  it('leaves distinct keys untouched and preserves order', () => {
+    expect(
+      consolidateSyncOptions(['CreateNamespace=true', 'Validate=false'])
+    ).toEqual(['CreateNamespace=true', 'Validate=false'])
+  })
+
+  it('drops exact duplicates', () => {
+    expect(
+      consolidateSyncOptions(['Replace=true', 'Replace=true'])
+    ).toEqual(['Replace=true'])
+  })
+
+  it('keeps the last value when a key conflicts', () => {
+    expect(
+      consolidateSyncOptions(['Validate=true', 'Validate=false'])
+    ).toEqual(['Validate=false'])
+  })
+
+  it('handles bare (valueless) options', () => {
+    expect(consolidateSyncOptions(['Prune', 'Prune'])).toEqual(['Prune'])
+  })
+})
+
+describe('warnUnknownSyncOptions', () => {
+  it('does not warn on recognised options', () => {
+    warnUnknownSyncOptions(['CreateNamespace=true', 'ServerSideApply=true'])
+    expect(core.warning).not.toHaveBeenCalled()
+  })
+
+  it('warns once per unrecognised key', () => {
+    warnUnknownSyncOptions(['ServerSideAply=true'])
+    expect(core.warning).toHaveBeenCalledTimes(1)
+    expect(core.warning).toHaveBeenCalledWith(
+      expect.stringContaining('ServerSideAply')
+    )
+  })
+
+  it('does not warn on flag-derived options via buildSyncBody', () => {
+    buildSyncBody({ replace: true, serverSide: true, applyOutOfSyncOnly: true })
+    expect(core.warning).not.toHaveBeenCalled()
   })
 })

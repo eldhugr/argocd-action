@@ -95,7 +95,7 @@ workloads named by `restart`, or nothing**) → `wait`, end to end:
     timeout: '600'
 ```
 
-`restart` is `false` by default, so a no-diff deploy does nothing (the app is
+`restart` is `false` by default, so a no-diff `deploy` does nothing (the app is
 already in its desired state). Set it to an explicit kind or comma-separated
 list (`Deployment`, `StatefulSet`, `Deployment,StatefulSet`) to force a rollout
 restart of those workloads when there's no rendered diff - useful when the image
@@ -141,7 +141,7 @@ per-application overrides.
   - `results` - JSON array of `{ app, diff, action, syncStatus, healthStatus, revision }`, or `{ app, error }` for failures.
   - `outcome` - `success` | `partial` | `failure`.
   - `failed` - JSON array of the application names that failed.
-  - A single-app deploy also sets the scalar `diff` / `sync-status` / `health-status` / `revision`.
+  - A single-app `deploy` also sets the scalar `diff` / `sync-status` / `health-status` / `revision`.
 
 ```yaml
 - if: ${{ steps.deploy.outputs.outcome != 'success' }}
@@ -174,6 +174,29 @@ triggers the sync and waits for it to settle (honouring `wait-for-*` and
 The same sync options (`prune`, `force`, `replace`, `server-side`,
 `apply-out-of-sync-only`, `sync-options`, `strategy`) also apply to the sync
 step performed by `deploy`.
+
+> Please note that `server-side`, `replace`, and `apply-out-of-sync-only` are convenience flags
+> that append `ServerSideApply=true`, `Replace=true`, and `ApplyOutOfSyncOnly=true`
+> to the same option list `sync-options` feeds - so `server-side: true` is exactly
+> equivalent to `sync-options: ServerSideApply=true`.
+>
+> If the same option is supplied both ways, it is **consolidated** to a single
+> entry, not duplicated. On a genuine conflict the **typed flag wins** (it is
+> applied last), and a warning is logged - e.g. `server-side: true` with
+> `sync-options: ServerSideApply=false` syncs server-side.
+>
+> The flags can only turn an option **on**: a `false`/unset flag emits nothing, so
+> it never removes a `sync-options` entry (`server-side: false` with
+> `sync-options: ServerSideApply=true` still applies server-side). To force an
+> option **off**, pass it through `sync-options` (e.g. `ServerSideApply=false`) and
+> don't also set the flag. Prefer one path per option.
+>
+> A `sync-options` key ArgoCD doesn't recognise (e.g., a typo like
+> `ServerSideAply=true`) logs a warning but does not fail the step.
+>
+> `prune`, `dry-run`, and `revision` are different: they map to top-level
+> sync-request fields rather than the option list, so they have no `sync-options`
+> string form.
 
 ### `rollback` - roll back to a previous deployment
 
@@ -427,9 +450,9 @@ Override `oidc-client-id` (default `argo-cd-cli`), `oidc-connector-id` (default
 
 ## How diffing works
 
-`diff` does **not** reimplement ArgoCD's normalization engine. It relies on the
+`diff` does **not** reimplement ArgoCD's normalisation engine. It relies on the
 server-computed `normalizedLiveState` (live, with `ignoreDifferences` and
-normalizers already applied) vs `predictedLiveState` (target) from the
+normalisers already applied) vs `predictedLiveState` (target) from the
 `managed-resources` endpoint, and reports a structural difference between them.
 This faithfully reproduces the diff / no-diff _decision_ the pipeline depends on.
 
