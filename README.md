@@ -282,6 +282,61 @@ for PR-triggered runs. See the
 [RBAC reference](https://argo-cd.readthedocs.io/en/latest/operator-manual/rbac/)
 for the exact action each operation needs in your ArgoCD version.
 
+ArgoCD matches the subject **exactly** (no glob), so each trigger needs its own
+line. To grant a whole org without listing every subject, see (3) below.
+
+</details>
+
+<details>
+<summary>3. Org-wide access without per-repo policies (optional)</summary>
+
+A wildcard subject like `repo:my-org/*:*` never matches, because ArgoCD compares
+the subject by exact string. To let **every repo in an org** (on any branch, tag,
+or PR) use the action without enumerating subjects, map a stable claim to an
+ArgoCD **group** and write the policy against the group instead.
+
+GitHub's ID token carries a `repository_owner` claim (the org name). Surface it as
+a group on the Dex connector from step 1:
+
+```yaml
+connectors:
+  - type: oidc
+    id: github-actions
+    name: GitHub Actions
+    config:
+      issuer: https://token.actions.githubusercontent.com/
+      claimMapping:
+        groups: repository_owner # every repo under the org shares this group
+```
+
+Keep `groups` in the RBAC scopes (`argocd-rbac-cm`):
+
+```yaml
+scopes: '[groups, sub]'
+```
+
+Then grant the group - ArgoCD matches policies against the subject **and** each
+group, so the verbs are identical to (2), only the subject changes:
+
+```
+# policy.csv
+p, my-org, applications, get,      */*, allow
+p, my-org, applications, sync,     */*, allow
+p, my-org, applications, update,   */*, allow
+p, my-org, applications, override, */*, allow
+p, my-org, applications, action/*, */*, allow
+```
+
+- **Blast radius** - this trusts every workflow in every org repo, on any ref, to
+  act on every app (`*/*`). Scope the object to a project (`<project>/*`) and drop
+  unused verbs to contain it.
+- **Fork PRs are excluded automatically** - GitHub does not grant `id-token: write`
+  to `pull_request` runs from forks, so external contributors can't mint a usable
+  token regardless of policy.
+- **Verify the mapping for your Dex version** - `claimMapping.groups` expects the
+  claim shape your Dex accepts (`repository_owner` is a scalar string); confirm the
+  group appears in the exchanged token before relying on it.
+
 </details>
 
 Override `oidc-client-id` (default `argo-cd-cli`), `oidc-connector-id` (default
