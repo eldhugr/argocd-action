@@ -1,4 +1,5 @@
 import * as core from '@actions/core'
+import { appLink, code, isSecretName, MASK, table, writeSummary } from '../summary.js'
 
 /** Parse newline-separated `name=value` pairs into [{name, value}]. */
 export function parseParameters(raw) {
@@ -10,7 +11,7 @@ export function parseParameters(raw) {
     .map((line) => {
       const idx = line.indexOf('=')
       if (idx === -1) {
-        throw new Error(`Invalid parameter "${line}" — expected name=value`)
+        throw new Error(`Invalid parameter "${line}" - expected name=value`)
       }
       return { name: line.slice(0, idx).trim(), value: line.slice(idx + 1) }
     })
@@ -38,7 +39,7 @@ function selectSource(spec, { sourceName, sourcePosition }) {
     }
     if (spec.sources.length === 1) return spec.sources[0]
     throw new Error(
-      'Application has multiple sources — set `source-name` or `source-position`.'
+      'Application has multiple sources - set `source-name` or `source-position`.'
     )
   }
   if (!spec.source) {
@@ -89,7 +90,11 @@ export async function setParameters(client, app, { parameters, sourceName, sourc
   applyHelmParameters(source, params)
 
   for (const { name, value } of params) {
-    log(`set ${name}=${value}`)
+    // Secret-looking values are registered so GitHub redacts them everywhere in
+    // the logs, and shown masked here too.
+    const secret = isSecretName(name)
+    if (secret && value) core.setSecret(value)
+    log(`set ${name}=${secret ? MASK : value}`)
   }
 
   await client.updateSpec(app, spec)
@@ -97,9 +102,20 @@ export async function setParameters(client, app, { parameters, sourceName, sourc
 }
 
 export async function run(client, app) {
+  const parameters = core.getInput('parameters')
   await setParameters(client, app, {
-    parameters: core.getInput('parameters'),
+    parameters,
     sourceName: core.getInput('source-name'),
     sourcePosition: core.getInput('source-position')
   })
+
+  const params = toParams(parameters)
+  await writeSummary('ArgoCD Set', [
+    `**Set ${params.length} parameter${params.length === 1 ? '' : 's'} on ${appLink(app, client)}.**`,
+    '',
+    table(
+      ['Parameter', 'Value'],
+      params.map((p) => [code(p.name), code(isSecretName(p.name) ? MASK : p.value)])
+    )
+  ])
 }

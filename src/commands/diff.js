@@ -2,6 +2,7 @@ import * as core from '@actions/core'
 import { diffManagedResources } from '../diff.js'
 import { parseBool } from '../config.js'
 import { sleep, resourceId } from '../util.js'
+import { appLink, code, table, writeSummary } from '../summary.js'
 
 const REFRESH_ANNOTATION = 'argocd.argoproj.io/refresh'
 
@@ -64,9 +65,36 @@ export async function run(client, app) {
 
   core.setOutput('diff', String(result.hasDiff))
 
+  await reportDiff(client, app, result)
+
   if (result.hasDiff && failOnDiff) {
     core.setFailed(`Application ${app} has differences.`)
   }
 
   return result.hasDiff
+}
+
+/** Title-case a diff status token (`modified` -> `Modified`). */
+function statusLabel(status) {
+  return status ? status.charAt(0).toUpperCase() + status.slice(1) : ''
+}
+
+/** Write the diff result to the GitHub step summary. */
+async function reportDiff(client, app, result) {
+  if (!result.hasDiff) {
+    await writeSummary('ArgoCD Diff', [`**No differences for ${appLink(app, client)}.**`])
+    return
+  }
+  const changed = result.resources.filter((r) => r.changed)
+  const plural = changed.length === 1 ? 'resource' : 'resources'
+  const rows = changed.map((r) => [
+    code(resourceId(r)),
+    statusLabel(r.status),
+    r.paths.length > 0 ? String(r.paths.length) : '-'
+  ])
+  await writeSummary('ArgoCD Diff', [
+    `**${changed.length} ${plural} differ for ${appLink(app, client)}.**`,
+    '',
+    table(['Resource', 'Change', 'Changed fields'], rows)
+  ])
 }

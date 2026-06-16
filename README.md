@@ -69,6 +69,16 @@ use; the others are the individual steps it composes, exposed for standalone use
 | `history`      | List the app's deployment history (sets the `history` output).                        |
 | `terminate-op` | Terminate the app's currently running sync operation.                                 |
 
+#### Step summaries
+
+Every command writes a section to the **GitHub step summary** (`$GITHUB_STEP_SUMMARY`):
+a short headline plus a table tailored to the command - deployed image(s) for
+`deploy`/`sync`/`rollback`/`wait`/`get`, changed resources for `diff`, the
+parameters set for `set`, and the deployment history for `history`. The
+application name links to its ArgoCD page. When a job runs several steps, each
+block is self-contained and separated by a horizontal rule, so the steps read
+cleanly stacked together.
+
 ### `deploy` - the umbrella command
 
 `deploy` replaces a whole "update image settings and deploy" shell step:
@@ -133,12 +143,15 @@ per-application overrides.
   failures are reported rather than aborting the step. With it off (default), the
   step fails if any application fails - `fail-fast` then controls whether the
   sequential run stops at the first failure or attempts the rest first.
-- **Status report** - a per-application table (deployed / failed, action, sync,
-  health, failure reason) is written to the **GitHub step summary**, and logged
-  with ✓/✗ markers. Reasons come from the app's operation message, conditions,
-  and any non-Healthy resources.
+- **Status report** - a per-application table (result, sync, health, and a details
+  column) is written to the **GitHub step summary**, and logged with ✓/✗ markers.
+  The result says what happened - `Deployed`, `Restarted`, `No change`, or `Failed`.
+  The application name links to its ArgoCD page, and on success the details column
+  shows the running container image(s) (`basename:tag`, first + `(+N)`); on failure
+  it holds the reason, taken from the app's operation message, conditions, and any
+  non-Healthy resources.
 - **Outputs** for downstream steps:
-  - `results` - JSON array of `{ app, diff, action, syncStatus, healthStatus, revision }`, or `{ app, error }` for failures.
+  - `results` - JSON array of `{ app, diff, action, syncStatus, healthStatus, revision, images }`, or `{ app, error }` for failures.
   - `outcome` - `success` | `partial` | `failure`.
   - `failed` - JSON array of the application names that failed.
   - A single-app `deploy` also sets the scalar `diff` / `sync-status` / `health-status` / `revision`.
@@ -394,6 +407,11 @@ Override `oidc-client-id` (default `argo-cd-cli`), `oidc-connector-id` (default
 |-----------------------------------|------------------------|-------------------------------------|
 | `parameters`                      | `name=value` per line  | Helm parameters to set              |
 | `source-name` / `source-position` | string / 1-based index | Target source for multi-source apps |
+
+Values for secret-looking parameter names (containing `password`, `token`,
+`secret`, `credential`, `auth`, ... or ending in `key`) are masked as `***` in
+the step summary and registered with `core.setSecret` so GitHub redacts them in
+the logs too.
 
 ### Sync - `sync`, `deploy` (sync step), some apply to `rollback`
 

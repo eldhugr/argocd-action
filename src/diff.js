@@ -3,7 +3,7 @@
  * decision. We compare the server-computed `normalizedLiveState` (live, with
  * ignoreDifferences and normalizers already applied) against the
  * `predictedLiveState` (target). This mirrors what the CLI renders, without
- * reimplementing ArgoCD's normalization engine — that work happens server-side.
+ * reimplementing ArgoCD's normalization engine - that work happens server-side.
  */
 
 function isObject(v) {

@@ -1,6 +1,7 @@
 import * as core from '@actions/core'
 import { parseBool, parseNumber } from '../config.js'
 import { waitForApp } from './wait.js'
+import { appLink, code, imagesCell, ok, table, writeSummary } from '../summary.js'
 
 /**
  * Resolve which deployment-history id to roll back to. Mirrors
@@ -56,6 +57,9 @@ export async function run(client, app) {
 
   if (dryRun) {
     core.info(`Dry-run rollback requested for ${app}; not waiting.`)
+    await writeSummary('ArgoCD Rollback', [
+      `**Dry-run rollback to deployment ${id} previewed for ${appLink(app, client)}; cluster unchanged.**`
+    ])
     return
   }
 
@@ -69,4 +73,13 @@ export async function run(client, app) {
   core.setOutput('sync-status', status.syncStatus)
   core.setOutput('health-status', status.healthStatus)
   core.setOutput('revision', status.revision)
+
+  await writeSummary('ArgoCD Rollback', [
+    `**${code(app)} rolled back to deployment ${id}.**`,
+    '',
+    table(
+      ['Application', 'Result', 'Sync', 'Health', 'Details'],
+      [[appLink(app, client), ok(`Rolled back (#${id})`), status.syncStatus, status.healthStatus, imagesCell(status.images)]]
+    )
+  ])
 }

@@ -1,6 +1,7 @@
 import * as core from '@actions/core'
 import { parseBool, parseNumber } from '../config.js'
 import { sleep } from '../util.js'
+import { appLink, code, escapeCell, fail, imagesCell, ok, table, writeSummary } from '../summary.js'
 
 /** Evaluate whether the application currently satisfies the wait conditions. */
 function evaluate(app, { forSync, forHealth, forOperation }) {
@@ -33,8 +34,8 @@ function evaluate(app, { forSync, forHealth, forOperation }) {
 }
 
 /**
- * Collect human-readable problem descriptions from an application's status —
- * the operation message, app conditions, and any non-Healthy resources — so a
+ * Collect human-readable problem descriptions from an application's status -
+ * the operation message, app conditions, and any non-Healthy resources - so a
  * failure/timeout can report *why* rather than just the state.
  */
 function describeProblems(application) {
@@ -58,7 +59,7 @@ function describeProblems(application) {
  * final status; throws on a failed operation or timeout. Reusable op shared by
  * the `wait` and `deploy` commands.
  *
- * @returns {Promise<{syncStatus: string, healthStatus: string, revision: string, opPhase: string}>}
+ * @returns {Promise<{syncStatus: string, healthStatus: string, revision: string, images: string[], opPhase: string}>}
  */
 export async function waitForApp(client, app, {
   timeoutSeconds = 600,
@@ -86,6 +87,7 @@ export async function waitForApp(client, app, {
         application.status?.sync?.revision ||
         (application.status?.sync?.revisions || []).join(',') ||
         '',
+      images: application.status?.summary?.images || [],
       opPhase: ev.opPhase
     }
     onPoll?.(status)
@@ -108,7 +110,7 @@ export async function waitForApp(client, app, {
 
     if (Date.now() >= deadline) {
       const problems = describeProblems(application)
-      const extra = problems.length ? ` — ${problems.join('; ')}` : ''
+      const extra = problems.length ? ` - ${problems.join('; ')}` : ''
       throw new Error(`Timed out after ${timeoutSeconds}s waiting for ${app} (${ev.reasons.join(', ')})${extra}.`)
     }
 
@@ -117,16 +119,37 @@ export async function waitForApp(client, app, {
 }
 
 export async function run(client, app) {
-  await waitForApp(client, app, {
-    timeoutSeconds: parseNumber(core.getInput('timeout'), 600),
-    forSync: parseBool(core.getInput('wait-for-sync'), true),
-    forHealth: parseBool(core.getInput('wait-for-health'), true),
-    forOperation: parseBool(core.getInput('wait-for-operation'), true),
-    refresh: core.getInput('refresh'),
-    onPoll: (s) => {
-      core.setOutput('sync-status', s.syncStatus)
-      core.setOutput('health-status', s.healthStatus)
-      core.setOutput('revision', s.revision)
-    }
-  })
+  try {
+    const status = await waitForApp(client, app, {
+      timeoutSeconds: parseNumber(core.getInput('timeout'), 600),
+      forSync: parseBool(core.getInput('wait-for-sync'), true),
+      forHealth: parseBool(core.getInput('wait-for-health'), true),
+      forOperation: parseBool(core.getInput('wait-for-operation'), true),
+      refresh: core.getInput('refresh'),
+      onPoll: (s) => {
+        core.setOutput('sync-status', s.syncStatus)
+        core.setOutput('health-status', s.healthStatus)
+        core.setOutput('revision', s.revision)
+      }
+    })
+    await writeSummary('ArgoCD Wait', [
+      `**${code(app)} is ${status.syncStatus} and ${status.healthStatus}.**`,
+      '',
+      table(
+        ['Application', 'Result', 'Sync', 'Health', 'Details'],
+        [[appLink(app, client), ok('Ready'), status.syncStatus, status.healthStatus, imagesCell(status.images)]]
+      )
+    ])
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    await writeSummary('ArgoCD Wait', [
+      `**${code(app)} did not reach the desired state.**`,
+      '',
+      table(
+        ['Application', 'Result', 'Sync', 'Health', 'Details'],
+        [[appLink(app, client), fail('Not ready'), '', '', escapeCell(reason)]]
+      )
+    ])
+    throw err
+  }
 }

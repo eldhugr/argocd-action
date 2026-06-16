@@ -29605,6 +29605,132 @@ class ArgoClient {
   }
 }
 
+/**
+ * Shared helpers for the per-command GitHub step-summary blocks. Every command
+ * renders through {@link writeSummary} so that, when a job runs several action
+ * steps, each block is self-contained and visually separated by a rule.
+ */
+
+/** One Markdown table cell: strip pipes/newlines and cap the length. */
+function escapeCell(value) {
+  return String(value).replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ').slice(0, 300)
+}
+
+/** Wrap a value in an escaped, monospace code span (empty stays empty). */
+function code(value) {
+  const v = escapeCell(value);
+  return v ? `\`${v}\`` : ''
+}
+
+/** A ✓-prefixed success label for the Result column. */
+const ok = (text) => `✓ ${text}`;
+
+/** A ✗-prefixed failure label for the Result column. */
+const fail = (text) => `✗ ${text}`;
+
+/**
+ * Application name as a monospace label, linked to its ArgoCD UI page when the
+ * client knows the server. The namespace defaults to `argocd`.
+ */
+function appLink(app, client) {
+  const label = code(app);
+  const baseUrl = client?.baseUrl || '';
+  if (!baseUrl) return label
+  const ns = encodeURIComponent(client?.appNamespace || 'argocd');
+  return `[${label}](${baseUrl}/applications/${ns}/${encodeURIComponent(app)})`
+}
+
+/**
+ * Shorten a full image reference to `basename:tag` (or `basename@sha256:1234567`
+ * for digests), dropping the registry/namespace prefix. A registry port colon
+ * (e.g. `registry:5000/...`) is not mistaken for the tag separator.
+ */
+function shortImage(ref) {
+  const s = String(ref || '').trim();
+  if (!s) return ''
+  const at = s.indexOf('@');
+  let name = s;
+  let suffix = '';
+  if (at !== -1) {
+    name = s.slice(0, at);
+    const m = /^([a-z0-9]+):([0-9a-f]+)$/i.exec(s.slice(at + 1));
+    suffix = m ? `@${m[1]}:${m[2].slice(0, 7)}` : `@${s.slice(at + 1)}`;
+  } else {
+    const lastColon = s.lastIndexOf(':');
+    if (lastColon > s.lastIndexOf('/')) {
+      name = s.slice(0, lastColon);
+      suffix = `:${s.slice(lastColon + 1)}`;
+    }
+  }
+  return name.slice(name.lastIndexOf('/') + 1) + suffix
+}
+
+/**
+ * The container image(s) reported running, shortened to `basename:tag`. Shows
+ * the first image plus a `(+N)` count when several run; '' when none are known.
+ */
+function imagesCell(images) {
+  const list = (images || []).map(shortImage).filter(Boolean);
+  if (list.length === 0) return ''
+  const extra = list.length > 1 ? ` (+${list.length - 1})` : '';
+  return `${code(list[0])}${extra}`
+}
+
+/** Placeholder shown in place of a masked secret value. */
+const MASK = '***';
+
+/**
+ * Heuristic: does this parameter name look like it holds a secret? Matches common
+ * substrings (password, token, secret, credential, auth, ...) and any name ending
+ * in "key" (`tls.key`, `apiKey`, ...). Separators and case are ignored, so
+ * `api-key`, `api_key` and `apiKey` all match. Errs toward masking; used to
+ * redact values in step summaries and logs.
+ */
+function isSecretName(name) {
+  const n = String(name || '').toLowerCase().replace(/[-_.]/g, '');
+  return /pass|pwd|secret|token|credential|auth|signature|apikey|accesskey|privatekey/.test(n) || /key$/.test(n)
+}
+
+/** The first revision, shortened to a 7-char sha when it looks like one. */
+function shortRevision(revision) {
+  const first = String(revision || '').split(',')[0].trim();
+  if (!first) return ''
+  return /^[0-9a-f]{8,}$/i.test(first) ? first.slice(0, 7) : first
+}
+
+/** Format an RFC3339 timestamp as `YYYY-MM-DD HH:MM[ UTC]`; passthrough on miss. */
+function fmtTime(iso) {
+  const s = String(iso || '').trim();
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2})?(?:\.\d+)?(Z)?/.exec(s);
+  return m ? `${m[1]} ${m[2]}${m[3] ? ' UTC' : ''}` : s
+}
+
+/** Build a left-aligned Markdown table from headers and an array of row arrays. */
+function table(headers, rows) {
+  return [
+    `| ${headers.join(' | ')} |`,
+    `| ${headers.map(() => ':--').join(' | ')} |`,
+    ...rows.map((cells) => `| ${cells.join(' | ')} |`)
+  ].join('\n')
+}
+
+/**
+ * Append a self-contained summary block to the GitHub step summary, followed by
+ * a horizontal rule so several action steps in one job stay visually separated.
+ * Best-effort: never throws (the step summary is unavailable when run locally).
+ *
+ * @param {string} title  section heading, e.g. "ArgoCD Deploy"
+ * @param {string[]} lines body lines (headline, tables, notes)
+ */
+async function writeSummary(title, lines) {
+  try {
+    summary.addRaw(`### ${title}\n\n${lines.join('\n')}\n`, true).addSeparator();
+    await summary.write();
+  } catch {
+    // Step summary is best-effort (e.g. unavailable when run locally).
+  }
+}
+
 /** Parse newline-separated `name=value` pairs into [{name, value}]. */
 function parseParameters(raw) {
   if (!raw) return []
@@ -29615,7 +29741,7 @@ function parseParameters(raw) {
     .map((line) => {
       const idx = line.indexOf('=');
       if (idx === -1) {
-        throw new Error(`Invalid parameter "${line}" — expected name=value`)
+        throw new Error(`Invalid parameter "${line}" - expected name=value`)
       }
       return { name: line.slice(0, idx).trim(), value: line.slice(idx + 1) }
     })
@@ -29643,7 +29769,7 @@ function selectSource(spec, { sourceName, sourcePosition }) {
     }
     if (spec.sources.length === 1) return spec.sources[0]
     throw new Error(
-      'Application has multiple sources — set `source-name` or `source-position`.'
+      'Application has multiple sources - set `source-name` or `source-position`.'
     )
   }
   if (!spec.source) {
@@ -29694,7 +29820,11 @@ async function setParameters(client, app, { parameters, sourceName, sourcePositi
   applyHelmParameters(source, params);
 
   for (const { name, value } of params) {
-    log(`set ${name}=${value}`);
+    // Secret-looking values are registered so GitHub redacts them everywhere in
+    // the logs, and shown masked here too.
+    const secret = isSecretName(name);
+    if (secret && value) setSecret(value);
+    log(`set ${name}=${secret ? MASK : value}`);
   }
 
   await client.updateSpec(app, spec);
@@ -29702,11 +29832,22 @@ async function setParameters(client, app, { parameters, sourceName, sourcePositi
 }
 
 async function run$9(client, app) {
+  const parameters = getInput('parameters');
   await setParameters(client, app, {
-    parameters: getInput('parameters'),
+    parameters,
     sourceName: getInput('source-name'),
     sourcePosition: getInput('source-position')
   });
+
+  const params = toParams(parameters);
+  await writeSummary('ArgoCD Set', [
+    `**Set ${params.length} parameter${params.length === 1 ? '' : 's'} on ${appLink(app, client)}.**`,
+    '',
+    table(
+      ['Parameter', 'Value'],
+      params.map((p) => [code(p.name), code(isSecretName(p.name) ? MASK : p.value)])
+    )
+  ]);
 }
 
 /**
@@ -29714,7 +29855,7 @@ async function run$9(client, app) {
  * decision. We compare the server-computed `normalizedLiveState` (live, with
  * ignoreDifferences and normalizers already applied) against the
  * `predictedLiveState` (target). This mirrors what the CLI renders, without
- * reimplementing ArgoCD's normalization engine — that work happens server-side.
+ * reimplementing ArgoCD's normalization engine - that work happens server-side.
  */
 
 function isObject(v) {
@@ -29899,11 +30040,38 @@ async function run$8(client, app) {
 
   setOutput('diff', String(result.hasDiff));
 
+  await reportDiff(client, app, result);
+
   if (result.hasDiff && failOnDiff) {
     setFailed(`Application ${app} has differences.`);
   }
 
   return result.hasDiff
+}
+
+/** Title-case a diff status token (`modified` -> `Modified`). */
+function statusLabel(status) {
+  return status ? status.charAt(0).toUpperCase() + status.slice(1) : ''
+}
+
+/** Write the diff result to the GitHub step summary. */
+async function reportDiff(client, app, result) {
+  if (!result.hasDiff) {
+    await writeSummary('ArgoCD Diff', [`**No differences for ${appLink(app, client)}.**`]);
+    return
+  }
+  const changed = result.resources.filter((r) => r.changed);
+  const plural = changed.length === 1 ? 'resource' : 'resources';
+  const rows = changed.map((r) => [
+    code(resourceId(r)),
+    statusLabel(r.status),
+    r.paths.length > 0 ? String(r.paths.length) : '-'
+  ]);
+  await writeSummary('ArgoCD Diff', [
+    `**${changed.length} ${plural} differ for ${appLink(app, client)}.**`,
+    '',
+    table(['Resource', 'Change', 'Changed fields'], rows)
+  ]);
 }
 
 /** Evaluate whether the application currently satisfies the wait conditions. */
@@ -29937,8 +30105,8 @@ function evaluate(app, { forSync, forHealth, forOperation }) {
 }
 
 /**
- * Collect human-readable problem descriptions from an application's status —
- * the operation message, app conditions, and any non-Healthy resources — so a
+ * Collect human-readable problem descriptions from an application's status -
+ * the operation message, app conditions, and any non-Healthy resources - so a
  * failure/timeout can report *why* rather than just the state.
  */
 function describeProblems(application) {
@@ -29962,7 +30130,7 @@ function describeProblems(application) {
  * final status; throws on a failed operation or timeout. Reusable op shared by
  * the `wait` and `deploy` commands.
  *
- * @returns {Promise<{syncStatus: string, healthStatus: string, revision: string, opPhase: string}>}
+ * @returns {Promise<{syncStatus: string, healthStatus: string, revision: string, images: string[], opPhase: string}>}
  */
 async function waitForApp(client, app, {
   timeoutSeconds = 600,
@@ -29990,6 +30158,7 @@ async function waitForApp(client, app, {
         application.status?.sync?.revision ||
         (application.status?.sync?.revisions || []).join(',') ||
         '',
+      images: application.status?.summary?.images || [],
       opPhase: ev.opPhase
     };
     onPoll?.(status);
@@ -30012,7 +30181,7 @@ async function waitForApp(client, app, {
 
     if (Date.now() >= deadline) {
       const problems = describeProblems(application);
-      const extra = problems.length ? ` — ${problems.join('; ')}` : '';
+      const extra = problems.length ? ` - ${problems.join('; ')}` : '';
       throw new Error(`Timed out after ${timeoutSeconds}s waiting for ${app} (${ev.reasons.join(', ')})${extra}.`)
     }
 
@@ -30021,18 +30190,39 @@ async function waitForApp(client, app, {
 }
 
 async function run$7(client, app) {
-  await waitForApp(client, app, {
-    timeoutSeconds: parseNumber(getInput('timeout'), 600),
-    forSync: parseBool(getInput('wait-for-sync'), true),
-    forHealth: parseBool(getInput('wait-for-health'), true),
-    forOperation: parseBool(getInput('wait-for-operation'), true),
-    refresh: getInput('refresh'),
-    onPoll: (s) => {
-      setOutput('sync-status', s.syncStatus);
-      setOutput('health-status', s.healthStatus);
-      setOutput('revision', s.revision);
-    }
-  });
+  try {
+    const status = await waitForApp(client, app, {
+      timeoutSeconds: parseNumber(getInput('timeout'), 600),
+      forSync: parseBool(getInput('wait-for-sync'), true),
+      forHealth: parseBool(getInput('wait-for-health'), true),
+      forOperation: parseBool(getInput('wait-for-operation'), true),
+      refresh: getInput('refresh'),
+      onPoll: (s) => {
+        setOutput('sync-status', s.syncStatus);
+        setOutput('health-status', s.healthStatus);
+        setOutput('revision', s.revision);
+      }
+    });
+    await writeSummary('ArgoCD Wait', [
+      `**${code(app)} is ${status.syncStatus} and ${status.healthStatus}.**`,
+      '',
+      table(
+        ['Application', 'Result', 'Sync', 'Health', 'Details'],
+        [[appLink(app, client), ok('Ready'), status.syncStatus, status.healthStatus, imagesCell(status.images)]]
+      )
+    ]);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    await writeSummary('ArgoCD Wait', [
+      `**${code(app)} did not reach the desired state.**`,
+      '',
+      table(
+        ['Application', 'Result', 'Sync', 'Health', 'Details'],
+        [[appLink(app, client), fail('Not ready'), '', '', escapeCell(reason)]]
+      )
+    ]);
+    throw err
+  }
 }
 
 /**
@@ -30111,7 +30301,7 @@ function buildSyncBody({
  * Consolidate a `Name=value` sync-option list so the same option can't be sent
  * twice (e.g. `server-side: true` *and* `sync-options: ServerSideApply=true`).
  * Duplicate keys collapse to a single entry keeping the **last** value, so the
- * boolean flags — appended last by buildSyncBody — win over the same option
+ * boolean flags - appended last by buildSyncBody - win over the same option
  * given as a raw string. Exact duplicates are dropped silently; a genuine value
  * conflict for one key is surfaced as a warning. Insertion order is preserved.
  */
@@ -30188,6 +30378,9 @@ async function run$6(client, app) {
   // A dry-run never produces an operation to wait for.
   if (body.dryRun) {
     info(`Dry-run sync requested for ${app}; not waiting.`);
+    await writeSummary('ArgoCD Sync', [
+      `**Dry-run sync previewed for ${appLink(app, client)}; cluster unchanged.**`
+    ]);
     return
   }
 
@@ -30201,6 +30394,15 @@ async function run$6(client, app) {
   setOutput('sync-status', status.syncStatus);
   setOutput('health-status', status.healthStatus);
   setOutput('revision', status.revision);
+
+  await writeSummary('ArgoCD Sync', [
+    `**${code(app)} synced.**`,
+    '',
+    table(
+      ['Application', 'Result', 'Sync', 'Health', 'Details'],
+      [[appLink(app, client), ok('Synced'), status.syncStatus, status.healthStatus, imagesCell(status.images)]]
+    )
+  ]);
 }
 
 /**
@@ -30290,7 +30492,8 @@ async function deployOne(client, app, settings) {
     action: 'none',
     syncStatus: '',
     healthStatus: '',
-    revision: ''
+    revision: '',
+    images: []
   };
 
   // 1. Update Helm parameters (skipped when none provided).
@@ -30319,7 +30522,7 @@ async function deployOne(client, app, settings) {
     const n = await restartResources(client, app, { kinds: settings.restartKinds, log });
     result.action = `restart(${n})`;
   } else {
-    log(`No diff for ${app} — nothing to do.`);
+    log(`No diff for ${app} - nothing to do.`);
     result.action = 'none';
   }
 
@@ -30337,6 +30540,7 @@ async function deployOne(client, app, settings) {
   result.syncStatus = status.syncStatus;
   result.healthStatus = status.healthStatus;
   result.revision = status.revision;
+  result.images = status.images;
   return result
 }
 
@@ -30388,7 +30592,7 @@ async function run$5(client, app) {
     setOutput('revision', r.revision);
   }
 
-  await reportStatus(results, outcome);
+  await reportStatus(client, results, outcome);
 
   if (failures.length > 0 && !allowFailure) {
     throw new Error(
@@ -30398,20 +30602,23 @@ async function run$5(client, app) {
   }
   if (failures.length > 0) {
     warning(
-      `${failures.length}/${apps.length} application(s) failed, but allow-failure is set — not failing the job.`
+      `${failures.length}/${apps.length} application(s) failed, but allow-failure is set - not failing the job.`
     );
   }
 }
 
-/** One Markdown table cell: strip pipes/newlines and cap the length. */
-function escapeCell(value) {
-  return String(value).replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ').slice(0, 300)
+/** Map a successful deploy's action token to a single "what happened" label. */
+function resultLabel(action) {
+  if (action === 'sync') return ok('Deployed')
+  if (/^restart\(\d+\)$/.test(action)) return ok('Restarted')
+  return ok('No change')
 }
 
 /** Log a per-application summary and write a table to the GitHub step summary. */
-async function reportStatus(results, outcome) {
+async function reportStatus(client, results, outcome) {
   const succeeded = results.filter((r) => !r.error);
   const failed = results.filter((r) => r.error);
+  const total = results.length;
 
   info(`Deploy ${outcome}: ${succeeded.length} succeeded, ${failed.length} failed.`);
   for (const r of results) {
@@ -30419,25 +30626,30 @@ async function reportStatus(results, outcome) {
     else info(`  ✓ ${r.app} (${r.action}) sync=${r.syncStatus} health=${r.healthStatus}`);
   }
 
+  const plural = (n) => (n === 1 ? 'application' : 'applications');
+  const headline =
+    outcome === 'success'
+      ? `**${succeeded.length} ${plural(succeeded.length)} deployed.**`
+      : outcome === 'failure'
+        ? `**${failed.length} ${plural(failed.length)} failed.**`
+        : `**${succeeded.length} of ${total} deployed**, ${failed.length} failed.`;
+
   const rows = results.map((r) =>
     r.error
-      ? `| ${r.app} | ✗ failed | — | — | — | ${escapeCell(r.error)} |`
-      : `| ${r.app} | ✓ deployed | ${r.action} | ${r.syncStatus} | ${r.healthStatus} | |`
+      ? [appLink(r.app, client), fail('Failed'), '', '', escapeCell(r.error)]
+      : [
+          appLink(r.app, client),
+          resultLabel(r.action),
+          r.syncStatus || 'Unknown',
+          r.healthStatus || 'Unknown',
+          imagesCell(r.images)
+        ]
   );
-  const md = [
-    `### ArgoCD deploy — ${succeeded.length} succeeded, ${failed.length} failed`,
+  await writeSummary('ArgoCD Deploy', [
+    headline,
     '',
-    '| Application | Status | Action | Sync | Health | Reason |',
-    '| --- | --- | --- | --- | --- | --- |',
-    ...rows,
-    ''
-  ].join('\n');
-
-  try {
-    await summary.addRaw(md).write();
-  } catch {
-    // Step summary is best-effort (e.g. unavailable when run locally).
-  }
+    table(['Application', 'Result', 'Sync', 'Health', 'Details'], rows)
+  ]);
 }
 
 /**
@@ -30454,15 +30666,31 @@ async function run$4(client, app) {
   const revision =
     status.sync?.revision || (status.sync?.revisions || []).join(',') || '';
   const images = status.summary?.images || [];
+  const history = status.history || [];
 
-  info(`${app}: sync=${syncStatus} health=${healthStatus} revision=${revision || '—'}`);
+  info(`${app}: sync=${syncStatus} health=${healthStatus} revision=${revision || '-'}`);
   for (const image of images) info(`  image: ${image}`);
 
   setOutput('sync-status', syncStatus);
   setOutput('health-status', healthStatus);
   setOutput('revision', revision);
   setOutput('images', JSON.stringify(images));
-  setOutput('history', JSON.stringify(status.history || []));
+  setOutput('history', JSON.stringify(history));
+
+  const lines = [
+    `**${code(app)} is ${syncStatus} and ${healthStatus}.**`,
+    '',
+    table(
+      ['Application', 'Sync', 'Health', 'Revision', 'Image'],
+      [[appLink(app, client), syncStatus, healthStatus, code(shortRevision(revision)), imagesCell(images)]]
+    )
+  ];
+  if (history.length > 0) {
+    const last = [...history].sort((a, b) => Number(b.id) - Number(a.id))[0];
+    const when = last?.deployedAt ? `; last deployed ${fmtTime(last.deployedAt)}` : '';
+    lines.push('', `${history.length} deployment${history.length === 1 ? '' : 's'} in history${when}.`);
+  }
+  await writeSummary('ArgoCD Get', lines);
 }
 
 /**
@@ -30519,6 +30747,9 @@ async function run$3(client, app) {
 
   if (dryRun) {
     info(`Dry-run rollback requested for ${app}; not waiting.`);
+    await writeSummary('ArgoCD Rollback', [
+      `**Dry-run rollback to deployment ${id} previewed for ${appLink(app, client)}; cluster unchanged.**`
+    ]);
     return
   }
 
@@ -30532,7 +30763,19 @@ async function run$3(client, app) {
   setOutput('sync-status', status.syncStatus);
   setOutput('health-status', status.healthStatus);
   setOutput('revision', status.revision);
+
+  await writeSummary('ArgoCD Rollback', [
+    `**${code(app)} rolled back to deployment ${id}.**`,
+    '',
+    table(
+      ['Application', 'Result', 'Sync', 'Health', 'Details'],
+      [[appLink(app, client), ok(`Rolled back (#${id})`), status.syncStatus, status.healthStatus, imagesCell(status.images)]]
+    )
+  ]);
 }
+
+/** At most this many history rows are rendered in the step summary. */
+const SUMMARY_ROWS = 10;
 
 /**
  * List an application's deployment history. Mirrors `argocd app history`.
@@ -30547,11 +30790,28 @@ async function run$2(client, app) {
   } else {
     info(`Deployment history for ${app}:`);
     for (const h of history) {
-      info(`  id=${h.id} revision=${h.revision || '—'}${h.deployedAt ? ` deployedAt=${h.deployedAt}` : ''}`);
+      info(`  id=${h.id} revision=${h.revision || '-'}${h.deployedAt ? ` deployedAt=${h.deployedAt}` : ''}`);
     }
   }
 
   setOutput('history', JSON.stringify(history));
+
+  if (history.length === 0) {
+    await writeSummary('ArgoCD History', [`**No deployment history for ${appLink(app, client)}.**`]);
+    return
+  }
+  const newestFirst = [...history].sort((a, b) => Number(b.id) - Number(a.id));
+  const shown = newestFirst.slice(0, SUMMARY_ROWS);
+  const rows = shown.map((h) => [String(h.id), code(shortRevision(h.revision)), fmtTime(h.deployedAt)]);
+  const lines = [
+    `**${history.length} deployment${history.length === 1 ? '' : 's'} for ${appLink(app, client)}.**`,
+    '',
+    table(['ID', 'Revision', 'Deployed at'], rows)
+  ];
+  if (history.length > SUMMARY_ROWS) {
+    lines.push('', `_Showing the ${SUMMARY_ROWS} most recent of ${history.length}._`);
+  }
+  await writeSummary('ArgoCD History', lines);
 }
 
 /**
@@ -30562,6 +30822,10 @@ async function run$1(client, app) {
   info(`Terminating the running operation for ${app}...`);
   await client.terminateOperation(app);
   info(`Termination requested for ${app}.`);
+
+  await writeSummary('ArgoCD Terminate Operation', [
+    `**Termination requested for ${appLink(app, client)}.**`
+  ]);
 }
 
 const COMMANDS = {

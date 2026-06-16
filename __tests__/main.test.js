@@ -399,7 +399,7 @@ describe('deploy (failure handling)', () => {
       timeout: '30',
       restart: 'Deployment',
       parallel: 'false',
-      'fail-fast': 'true', // explicitly on — allow-failure must override it
+      'fail-fast': 'true', // explicitly on - allow-failure must override it
       'allow-failure': 'true',
       applications: JSON.stringify(['app.bad', 'app.good'])
     })

@@ -5,6 +5,7 @@ import { computeDiff, logDiff } from './diff.js'
 import { waitForApp } from './wait.js'
 import { restartResources } from './restart.js'
 import { buildSyncBody, readSyncOptions } from './sync.js'
+import { appLink, escapeCell, fail, imagesCell, ok, table, writeSummary } from '../summary.js'
 
 /**
  * The `deploy` umbrella command. For each application it performs the same
@@ -93,7 +94,8 @@ async function deployOne(client, app, settings) {
     action: 'none',
     syncStatus: '',
     healthStatus: '',
-    revision: ''
+    revision: '',
+    images: []
   }
 
   // 1. Update Helm parameters (skipped when none provided).
@@ -122,7 +124,7 @@ async function deployOne(client, app, settings) {
     const n = await restartResources(client, app, { kinds: settings.restartKinds, log })
     result.action = `restart(${n})`
   } else {
-    log(`No diff for ${app} — nothing to do.`)
+    log(`No diff for ${app} - nothing to do.`)
     result.action = 'none'
   }
 
@@ -140,6 +142,7 @@ async function deployOne(client, app, settings) {
   result.syncStatus = status.syncStatus
   result.healthStatus = status.healthStatus
   result.revision = status.revision
+  result.images = status.images
   return result
 }
 
@@ -191,7 +194,7 @@ export async function run(client, app) {
     core.setOutput('revision', r.revision)
   }
 
-  await reportStatus(results, outcome)
+  await reportStatus(client, results, outcome)
 
   if (failures.length > 0 && !allowFailure) {
     throw new Error(
@@ -201,20 +204,23 @@ export async function run(client, app) {
   }
   if (failures.length > 0) {
     core.warning(
-      `${failures.length}/${apps.length} application(s) failed, but allow-failure is set — not failing the job.`
+      `${failures.length}/${apps.length} application(s) failed, but allow-failure is set - not failing the job.`
     )
   }
 }
 
-/** One Markdown table cell: strip pipes/newlines and cap the length. */
-function escapeCell(value) {
-  return String(value).replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ').slice(0, 300)
+/** Map a successful deploy's action token to a single "what happened" label. */
+function resultLabel(action) {
+  if (action === 'sync') return ok('Deployed')
+  if (/^restart\(\d+\)$/.test(action)) return ok('Restarted')
+  return ok('No change')
 }
 
 /** Log a per-application summary and write a table to the GitHub step summary. */
-async function reportStatus(results, outcome) {
+async function reportStatus(client, results, outcome) {
   const succeeded = results.filter((r) => !r.error)
   const failed = results.filter((r) => r.error)
+  const total = results.length
 
   core.info(`Deploy ${outcome}: ${succeeded.length} succeeded, ${failed.length} failed.`)
   for (const r of results) {
@@ -222,23 +228,28 @@ async function reportStatus(results, outcome) {
     else core.info(`  ✓ ${r.app} (${r.action}) sync=${r.syncStatus} health=${r.healthStatus}`)
   }
 
+  const plural = (n) => (n === 1 ? 'application' : 'applications')
+  const headline =
+    outcome === 'success'
+      ? `**${succeeded.length} ${plural(succeeded.length)} deployed.**`
+      : outcome === 'failure'
+        ? `**${failed.length} ${plural(failed.length)} failed.**`
+        : `**${succeeded.length} of ${total} deployed**, ${failed.length} failed.`
+
   const rows = results.map((r) =>
     r.error
-      ? `| ${r.app} | ✗ failed | — | — | — | ${escapeCell(r.error)} |`
-      : `| ${r.app} | ✓ deployed | ${r.action} | ${r.syncStatus} | ${r.healthStatus} | |`
+      ? [appLink(r.app, client), fail('Failed'), '', '', escapeCell(r.error)]
+      : [
+          appLink(r.app, client),
+          resultLabel(r.action),
+          r.syncStatus || 'Unknown',
+          r.healthStatus || 'Unknown',
+          imagesCell(r.images)
+        ]
   )
-  const md = [
-    `### ArgoCD deploy — ${succeeded.length} succeeded, ${failed.length} failed`,
+  await writeSummary('ArgoCD Deploy', [
+    headline,
     '',
-    '| Application | Status | Action | Sync | Health | Reason |',
-    '| --- | --- | --- | --- | --- | --- |',
-    ...rows,
-    ''
-  ].join('\n')
-
-  try {
-    await core.summary.addRaw(md).write()
-  } catch {
-    // Step summary is best-effort (e.g. unavailable when run locally).
-  }
+    table(['Application', 'Result', 'Sync', 'Health', 'Details'], rows)
+  ])
 }

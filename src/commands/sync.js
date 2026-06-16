@@ -2,6 +2,7 @@ import * as core from '@actions/core'
 import { parseBool, parseNumber } from '../config.js'
 import { parseList } from '../util.js'
 import { waitForApp } from './wait.js'
+import { appLink, code, imagesCell, ok, table, writeSummary } from '../summary.js'
 
 /**
  * Build an ArgoCD ApplicationSyncRequest body from the high-level options.
@@ -49,7 +50,7 @@ export function buildSyncBody({
  * Consolidate a `Name=value` sync-option list so the same option can't be sent
  * twice (e.g. `server-side: true` *and* `sync-options: ServerSideApply=true`).
  * Duplicate keys collapse to a single entry keeping the **last** value, so the
- * boolean flags — appended last by buildSyncBody — win over the same option
+ * boolean flags - appended last by buildSyncBody - win over the same option
  * given as a raw string. Exact duplicates are dropped silently; a genuine value
  * conflict for one key is surfaced as a warning. Insertion order is preserved.
  */
@@ -126,6 +127,9 @@ export async function run(client, app) {
   // A dry-run never produces an operation to wait for.
   if (body.dryRun) {
     core.info(`Dry-run sync requested for ${app}; not waiting.`)
+    await writeSummary('ArgoCD Sync', [
+      `**Dry-run sync previewed for ${appLink(app, client)}; cluster unchanged.**`
+    ])
     return
   }
 
@@ -139,4 +143,13 @@ export async function run(client, app) {
   core.setOutput('sync-status', status.syncStatus)
   core.setOutput('health-status', status.healthStatus)
   core.setOutput('revision', status.revision)
+
+  await writeSummary('ArgoCD Sync', [
+    `**${code(app)} synced.**`,
+    '',
+    table(
+      ['Application', 'Result', 'Sync', 'Health', 'Details'],
+      [[appLink(app, client), ok('Synced'), status.syncStatus, status.healthStatus, imagesCell(status.images)]]
+    )
+  ])
 }

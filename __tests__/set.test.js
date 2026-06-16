@@ -1,5 +1,6 @@
 import { describe, expect, it } from '@jest/globals'
 import { parseParameters, applyHelmParameters } from '../src/commands/set.js'
+import { isSecretName } from '../src/summary.js'
 
 describe('parseParameters', () => {
   it('parses name=value pairs', () => {
@@ -50,5 +51,19 @@ describe('applyHelmParameters', () => {
       { name: 'a', value: 'new' },
       { name: 'b', value: '2' }
     ])
+  })
+})
+
+describe('isSecretName', () => {
+  it('flags secret-looking parameter names (separators/case ignored)', () => {
+    for (const name of ['db.password', 'apiKey', 'api-key', 'API_TOKEN', 'tls.key', 'auth.secret', 'oauthToken', 'signingKey']) {
+      expect(isSecretName(name)).toBe(true)
+    }
+  })
+
+  it('leaves ordinary parameter names visible', () => {
+    for (const name of ['image.tag', 'replicaCount', 'ingress.host', 'comments.release.refName']) {
+      expect(isSecretName(name)).toBe(false)
+    }
   })
 })
