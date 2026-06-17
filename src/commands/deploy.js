@@ -2,11 +2,11 @@ import * as core from '@actions/core'
 import { parseBool, parseNumber } from '../config.js'
 import { setParameters, toParams } from './set.js'
 import { computeDiff, logDiff } from './diff.js'
-import { renderUnifiedDiff } from '../diff.js'
+import { renderUnifiedDiff, imageChanges } from '../diff.js'
 import { waitForApp } from './wait.js'
 import { restartResources } from './restart.js'
 import { buildSyncBody, readSyncOptions } from './sync.js'
-import { appLink, code, escapeCell, fail, imagesCell, ok, table, writeSummary } from '../summary.js'
+import { appLink, code, escapeCell, fail, imagesCell, ok, shortImage, table, writeSummary } from '../summary.js'
 
 /**
  * The `deploy` umbrella command. For each application it performs the same
@@ -154,6 +154,11 @@ async function deployOne(client, app, settings) {
   if (settings.unified && diff.hasDiff) {
     result.diffText = renderUnifiedDiff(diff.resources)
   }
+  // Container-image transitions (old → new) drive the summary's Details cell, so
+  // a successful row shows what changed rather than just the end-state image.
+  if (diff.hasDiff) {
+    result.imageChanges = imageChanges(diff.resources)
+  }
 
   // 3. Rendered diff → sync. No diff → restart the chosen workloads (if any),
   //    otherwise nothing: the app is already in its desired state.
@@ -228,8 +233,9 @@ export async function run(client, app) {
   const succeeded = results.filter((r) => !r.error)
   const outcome = failures.length === 0 ? 'success' : succeeded.length === 0 ? 'failure' : 'partial'
 
-  // `diffText` is summary-only (it can be large); keep it out of the output.
-  core.setOutput('results', JSON.stringify(results.map(({ diffText, ...r }) => r)))
+  // `diffText`/`imageChanges` are summary-only; keep them out of the output so
+  // its documented shape stays stable.
+  core.setOutput('results', JSON.stringify(results.map(({ diffText, imageChanges: _i, ...r }) => r)))
   core.setOutput('outcome', outcome)
   core.setOutput('failed', JSON.stringify(failures.map((f) => f.app)))
   // Convenience scalar outputs when deploying exactly one application.
@@ -263,6 +269,20 @@ function resultLabel(action) {
   return ok('No change')
 }
 
+/**
+ * The Details cell for a successful deploy: the image transition (`old → new`,
+ * shortened to `basename:tag`) when a container image changed, otherwise the
+ * running image(s). Multiple changes stack with a line break.
+ */
+function detailsCell(r) {
+  if (r.imageChanges && r.imageChanges.length > 0) {
+    return r.imageChanges
+      .map(({ before, after }) => `${code(shortImage(before))} → ${code(shortImage(after))}`)
+      .join('<br>')
+  }
+  return imagesCell(r.images)
+}
+
 /** Log a per-application summary and write a table to the GitHub step summary. */
 async function reportStatus(client, results, outcome) {
   const succeeded = results.filter((r) => !r.error)
@@ -291,7 +311,7 @@ async function reportStatus(client, results, outcome) {
           resultLabel(r.action),
           r.syncStatus || 'Unknown',
           r.healthStatus || 'Unknown',
-          imagesCell(r.images)
+          detailsCell(r)
         ]
   )
   const lines = [

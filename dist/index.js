@@ -30204,6 +30204,31 @@ function diffManagedResources(items = []) {
   return { hasDiff: resources.some((r) => r.changed), resources }
 }
 
+/**
+ * Extract container-image changes from diffed resources: changed fields whose
+ * path ends in `.image` (the container image on a Deployment/StatefulSet/...).
+ * Returns deduped `{ before, after }` string pairs - useful for showing a concise
+ * `old → new` transition. Non-string or missing values are skipped.
+ */
+function imageChanges(resources = []) {
+  const seen = new Set();
+  const changes = [];
+  for (const r of resources) {
+    if (!r.changed) continue
+    for (const p of r.paths || []) {
+      if (p.type !== 'changed' || !/(^|\.)image$/.test(p.path)) continue
+      const before = typeof p.before === 'string' ? p.before : '';
+      const after = typeof p.after === 'string' ? p.after : '';
+      if (!before && !after) continue
+      const key = `${before} ${after}`;
+      if (seen.has(key)) continue
+      seen.add(key);
+      changes.push({ before, after });
+    }
+  }
+  return changes
+}
+
 // --- Unified (pretty) diff rendering ---------------------------------------
 
 /** Max field changes rendered per resource before the rest are summarised. */
@@ -30906,6 +30931,11 @@ async function deployOne(client, app, settings) {
   if (settings.unified && diff.hasDiff) {
     result.diffText = renderUnifiedDiff(diff.resources);
   }
+  // Container-image transitions (old → new) drive the summary's Details cell, so
+  // a successful row shows what changed rather than just the end-state image.
+  if (diff.hasDiff) {
+    result.imageChanges = imageChanges(diff.resources);
+  }
 
   // 3. Rendered diff → sync. No diff → restart the chosen workloads (if any),
   //    otherwise nothing: the app is already in its desired state.
@@ -30980,8 +31010,9 @@ async function run$5(client, app) {
   const succeeded = results.filter((r) => !r.error);
   const outcome = failures.length === 0 ? 'success' : succeeded.length === 0 ? 'failure' : 'partial';
 
-  // `diffText` is summary-only (it can be large); keep it out of the output.
-  setOutput('results', JSON.stringify(results.map(({ diffText, ...r }) => r)));
+  // `diffText`/`imageChanges` are summary-only; keep them out of the output so
+  // its documented shape stays stable.
+  setOutput('results', JSON.stringify(results.map(({ diffText, imageChanges: _i, ...r }) => r)));
   setOutput('outcome', outcome);
   setOutput('failed', JSON.stringify(failures.map((f) => f.app)));
   // Convenience scalar outputs when deploying exactly one application.
@@ -31015,6 +31046,20 @@ function resultLabel(action) {
   return ok('No change')
 }
 
+/**
+ * The Details cell for a successful deploy: the image transition (`old → new`,
+ * shortened to `basename:tag`) when a container image changed, otherwise the
+ * running image(s). Multiple changes stack with a line break.
+ */
+function detailsCell(r) {
+  if (r.imageChanges && r.imageChanges.length > 0) {
+    return r.imageChanges
+      .map(({ before, after }) => `${code(shortImage(before))} → ${code(shortImage(after))}`)
+      .join('<br>')
+  }
+  return imagesCell(r.images)
+}
+
 /** Log a per-application summary and write a table to the GitHub step summary. */
 async function reportStatus(client, results, outcome) {
   const succeeded = results.filter((r) => !r.error);
@@ -31043,7 +31088,7 @@ async function reportStatus(client, results, outcome) {
           resultLabel(r.action),
           r.syncStatus || 'Unknown',
           r.healthStatus || 'Unknown',
-          imagesCell(r.images)
+          detailsCell(r)
         ]
   );
   const lines = [

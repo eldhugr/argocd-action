@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@jest/globals'
-import { deepDiff, diffResource, diffManagedResources, renderUnifiedDiff } from '../src/diff.js'
+import { deepDiff, diffResource, diffManagedResources, renderUnifiedDiff, imageChanges } from '../src/diff.js'
 
 describe('deepDiff', () => {
   it('produces no diff for identical objects regardless of key order', () => {
@@ -184,5 +184,44 @@ describe('renderUnifiedDiff', () => {
     })
     const out = renderUnifiedDiff([res], { maxFields: 2 })
     expect(out).toContain('... and 3 more field(s)')
+  })
+})
+
+describe('imageChanges', () => {
+  const deployment = (live, target) =>
+    diffResource({
+      group: 'apps',
+      kind: 'Deployment',
+      name: 'web',
+      namespace: 'web',
+      normalizedLiveState: JSON.stringify(live),
+      predictedLiveState: JSON.stringify(target)
+    })
+
+  it('extracts a container image transition', () => {
+    const r = deployment(
+      { spec: { template: { spec: { containers: [{ name: 'web', image: 'repo/web:old' }] } } } },
+      { spec: { template: { spec: { containers: [{ name: 'web', image: 'repo/web:new' }] } } } }
+    )
+    expect(imageChanges([r])).toEqual([{ before: 'repo/web:old', after: 'repo/web:new' }])
+  })
+
+  it('ignores non-image field changes', () => {
+    const r = deployment({ spec: { replicas: 1 } }, { spec: { replicas: 2 } })
+    expect(imageChanges([r])).toEqual([])
+  })
+
+  it('dedupes identical transitions across resources', () => {
+    const a = deployment({ spec: { image: 'x:1' } }, { spec: { image: 'x:2' } })
+    const b = deployment({ spec: { image: 'x:1' } }, { spec: { image: 'x:2' } })
+    expect(imageChanges([a, b])).toEqual([{ before: 'x:1', after: 'x:2' }])
+  })
+
+  it('does not match lookalike fields like imagePullPolicy', () => {
+    const r = deployment(
+      { spec: { template: { spec: { containers: [{ imagePullPolicy: 'Always' }] } } } },
+      { spec: { template: { spec: { containers: [{ imagePullPolicy: 'IfNotPresent' }] } } } }
+    )
+    expect(imageChanges([r])).toEqual([])
   })
 })

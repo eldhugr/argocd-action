@@ -369,6 +369,16 @@ describe('deploy (single app)', () => {
     expect(interactions.restarts).toHaveLength(0)
     expect(core.setOutput).toHaveBeenCalledWith('diff', 'true')
     expect(core.setOutput).toHaveBeenCalledWith('sync-status', 'Synced')
+
+    // Details cell shows the image transition (old -> new), not just the end state.
+    const summary = core.summary.addRaw.mock.calls.map((c) => c[0]).join('\n')
+    expect(summary).toContain('`app:old` → `app:new`')
+
+    // The transition data stays out of the results output.
+    const results = JSON.parse(
+      core.setOutput.mock.calls.find((c) => c[0] === 'results')[1]
+    )
+    expect(results[0].imageChanges).toBeUndefined()
   })
 
   it('honors unified-diff in the per-app job log', async () => {

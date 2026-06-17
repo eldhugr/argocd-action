@@ -169,10 +169,11 @@ connections to the ArgoCD gateway; the rest wait their turn. Set `parallel:
 - **Status report** - a per-application table (result, sync, health, and a details
   column) is written to the **GitHub step summary**, and logged with ✓/✗ markers.
   The result says what happened - `Deployed`, `Restarted`, `No change`, or `Failed`.
-  The application name links to its ArgoCD page, and on success the details column
-  shows the running container image(s) (`basename:tag`, first + `(+N)`); on failure
-  it holds the reason, taken from the app's operation message, conditions, and any
-  non-Healthy resources.
+  The application name links to its ArgoCD page. On success the details column
+  shows the container image transition (`old → new`, shortened to `basename:tag`)
+  when an image changed, otherwise the running image(s) (first + `(+N)`); on
+  failure it holds the reason, taken from the app's operation message, conditions,
+  and any non-Healthy resources.
 - **Outputs** for downstream steps:
   - `results` - JSON array of `{ app, diff, action, syncStatus, healthStatus, revision, images }`, or `{ app, error }` for failures.
   - `outcome` - `success` | `partial` | `failure`.
