@@ -20,7 +20,6 @@ talks to the same HTTP gateway the `argocd` CLI uses
 - [Outputs](#outputs)
 - [How diffing works](#how-diffing-works)
 - [Development](#development)
-- [Roadmap](#roadmap)
 
 ## Quick start
 
@@ -72,7 +71,7 @@ use; the others are the individual steps it composes, exposed for standalone use
 #### Step summaries
 
 Every command writes a section to the **GitHub step summary** (`$GITHUB_STEP_SUMMARY`):
-a short headline plus a table tailored to the command - deployed image(s) for
+a short headline plus a table tailored to the command-deployed image(s) for
 `deploy`/`sync`/`rollback`/`wait`/`get`, changed resources for `diff`, the
 parameters set for `set`, and the deployment history for `history`. The
 application name links to its ArgoCD page. When a job runs several steps, each
@@ -194,8 +193,23 @@ triggers the sync and waits for it to settle (honouring `wait-for-*` and
 ```
 
 The same sync options (`prune`, `force`, `replace`, `server-side`,
-`apply-out-of-sync-only`, `sync-options`, `strategy`) also apply to the sync
-step performed by `deploy`.
+`apply-out-of-sync-only`, `sync-options`, `strategy`, `resources`) also apply to
+the sync step performed by `deploy`.
+
+To sync only part of an application, pass `resources` - one `[group:]kind:name`
+per line or comma-separated, mirroring `argocd app sync --resource`. The group is
+blank for core resources, written as `:Service:web` or just `Service:web`:
+
+```yaml
+- name: Sync only the web Deployment and its Service
+  uses: eldhugr/argocd-action@v1
+  with:
+    command: sync
+    application: app.stage.comments
+    resources: |
+      apps:Deployment:web
+      :Service:web
+```
 
 > Please note that `server-side`, `replace`, and `apply-out-of-sync-only` are convenience flags
 > that append `ServerSideApply=true`, `Replace=true`, and `ApplyOutOfSyncOnly=true`
@@ -412,39 +426,46 @@ Override `oidc-client-id` (default `argo-cd-cli`), `oidc-connector-id` (default
 
 ### Set parameters - `set`, `deploy`
 
-| input                             | values                 | description                         |
-|-----------------------------------|------------------------|-------------------------------------|
-| `parameters`                      | `name=value` per line  | Helm parameters to set              |
-| `source-name` / `source-position` | string / 1-based index | Target source for multi-source apps |
+| input                             | values                 | description                                       |
+|-----------------------------------|------------------------|---------------------------------------------------|
+| `parameters`                      | `name=value` per line  | Helm parameters to set                            |
+| `unset-parameters`                | name per line/comma    | Helm parameter names to remove (set/unset in one) |
+| `source-name` / `source-position` | string / 1-based index | Target source for multi-source apps               |
 
 Values for secret-looking parameter names (containing `password`, `token`,
 `secret`, `credential`, `auth`, ... or ending in `key`) are masked as `***` in
 the step summary and registered with `core.setSecret` so GitHub redacts them in
 the logs too.
 
+`unset-parameters` removes Helm parameters by name (one per line or comma-separated,
+names only). It can be combined with `parameters` in a single `set` to add some and
+remove others; removing a name that isn't set is a no-op. At least one of
+`parameters` / `unset-parameters` must be provided.
+
 ### Sync - `sync`, `deploy` (sync step), some apply to `rollback`
 
-| input                    | values                      | default | description                                                      |
-|--------------------------|-----------------------------|---------|------------------------------------------------------------------|
-| `prune`                  | `true` \| `false`           | `false` | Prune resources removed from Git (also `rollback`)               |
-| `force`                  | `true` \| `false`           | `false` | Force apply during sync                                          |
-| `replace`                | `true` \| `false`           | `false` | `Replace=true` sync option                                       |
-| `server-side`            | `true` \| `false`           | `false` | `ServerSideApply=true` sync option                               |
-| `apply-out-of-sync-only` | `true` \| `false`           | `false` | `ApplyOutOfSyncOnly=true` sync option                            |
-| `sync-options`           | `Name=value` per line/comma |         | Extra sync options (e.g. `CreateNamespace=true`)                 |
-| `strategy`               | `apply` \| `hook`           | `apply` | Sync strategy                                                    |
-| `dry-run`                | `true` \| `false`           | `false` | Don't apply changes; don't wait (also `rollback`)                |
-| `revision`               | git revision                |         | Target revision (`sync`) / revision to roll back to (`rollback`) |
+| input                    | values                             | default | description                                                      |
+|--------------------------|------------------------------------|---------|------------------------------------------------------------------|
+| `prune`                  | `true` \| `false`                  | `false` | Prune resources removed from Git (also `rollback`)               |
+| `force`                  | `true` \| `false`                  | `false` | Force apply during sync                                          |
+| `replace`                | `true` \| `false`                  | `false` | `Replace=true` sync option                                       |
+| `server-side`            | `true` \| `false`                  | `false` | `ServerSideApply=true` sync option                               |
+| `apply-out-of-sync-only` | `true` \| `false`                  | `false` | `ApplyOutOfSyncOnly=true` sync option                            |
+| `sync-options`           | `Name=value` per line/comma        |         | Extra sync options (e.g. `CreateNamespace=true`)                 |
+| `strategy`               | `apply` \| `hook`                  | `apply` | Sync strategy                                                    |
+| `dry-run`                | `true` \| `false`                  | `false` | Don't apply changes; don't wait (also `rollback`)                |
+| `revision`               | git revision                       |         | Target revision (`sync`) / revision to roll back to (`rollback`) |
+| `resources`              | `[group:]kind:name` per line/comma |         | Limit the sync to these resources (`argocd app sync --resource`) |
 
 ### Diff & wait - `diff`, `wait`, `deploy`, `get`, `rollback`
 
-| input                                                      | values                        | default  | description                                 |
-|------------------------------------------------------------|-------------------------------|----------|---------------------------------------------|
-| `refresh`                                                  | `false` \| `normal` \| `hard` | `normal` | Refresh the app before diff/wait/get        |
-| `fail-on-diff`                                             | `true` \| `false`             | `false`  | (`diff`) fail the step when a diff is found |
+| input                                                      | values                        | default  | description                                                                                                |
+|------------------------------------------------------------|-------------------------------|----------|------------------------------------------------------------------------------------------------------------|
+| `refresh`                                                  | `false` \| `normal` \| `hard` | `normal` | Refresh the app before diff/wait/get                                                                       |
+| `fail-on-diff`                                             | `true` \| `false`             | `false`  | (`diff`) fail the step when a diff is found                                                                |
 | `unified-diff`                                             | `true` \| `false`             | `false`  | (`diff`, `deploy`) show field-level `+`/`-` diff values (in the `diff` summary and both commands' job log) |
-| `timeout`                                                  | seconds (integer)             | `600`    | Max time to wait for Synced/Healthy         |
-| `wait-for-sync` / `wait-for-health` / `wait-for-operation` | `true` \| `false`             | `true`   | Conditions to wait on                       |
+| `timeout`                                                  | seconds (integer)             | `600`    | Max time to wait for Synced/Healthy                                                                        |
+| `wait-for-sync` / `wait-for-health` / `wait-for-operation` | `true` \| `false`             | `true`   | Conditions to wait on                                                                                      |
 
 ### Rollback - `rollback`
 
@@ -507,9 +528,3 @@ before committing**.
 > Please note that the template's live `test-action` CI job is omitted because exercising the
 > commands needs a real ArgoCD server; the in-process mock-API integration test
 > in `__tests__/main.test.js` covers that path instead.
-
-## Roadmap
-
-- Post the diff to a pull request as a comment (the unified diff rendering it
-  would use already ships - see `unified-diff`).
-- Resource-scoped sync (`--resource group:kind:name`) and `unset` for parameters.

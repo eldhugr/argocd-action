@@ -29605,6 +29605,29 @@ class ArgoClient {
   }
 }
 
+/** Resolve after `ms` milliseconds. Shared by the polling loops. */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Render a managed/status resource as `Kind/namespace/name` (namespace omitted
+ * for cluster-scoped resources). Shared by the diff and restart log output.
+ */
+function resourceId(r) {
+  return `${r.kind}/${r.namespace ? `${r.namespace}/` : ''}${r.name}`
+}
+
+/**
+ * Split a newline/comma-separated input into a trimmed, non-empty list,
+ * dropping `#` comment lines. Used for sync-options and similar list inputs.
+ */
+function parseList(raw) {
+  if (!raw) return []
+  return String(raw)
+    .split(/[\n,]/)
+    .map((s) => s.trim())
+    .filter((s) => s && !s.startsWith('#'))
+}
+
 /**
  * Shared helpers for the per-command GitHub step-summary blocks. Every command
  * renders through {@link writeSummary} so that, when a job runs several action
@@ -29791,6 +29814,15 @@ function applyHelmParameters(source, params) {
   return source
 }
 
+/** Remove helm parameters from a source by name. No-op when none are present. */
+function removeHelmParameters(source, names) {
+  if (!names || names.length === 0) return source
+  if (!source.helm || !Array.isArray(source.helm.parameters)) return source
+  const remove = new Set(names);
+  source.helm.parameters = source.helm.parameters.filter((p) => !remove.has(p.name));
+  return source
+}
+
 /**
  * Normalize the `parameters` input, which may be a newline-separated string, an
  * array of `name=value` strings, or an array of `{ name, value }` objects.
@@ -29807,10 +29839,11 @@ function toParams(parameters) {
  * Apply Helm parameters to an application's source and persist the spec.
  * Reusable op shared by the `set` and `deploy` commands.
  */
-async function setParameters(client, app, { parameters, sourceName, sourcePosition, log = info } = {}) {
+async function setParameters(client, app, { parameters, unsetParameters, sourceName, sourcePosition, log = info } = {}) {
   const params = toParams(parameters);
-  if (params.length === 0) {
-    throw new Error('command "set" requires at least one parameter (input `parameters`).')
+  const unset = parseList(unsetParameters);
+  if (params.length === 0 && unset.length === 0) {
+    throw new Error('command "set" requires at least one parameter to set (`parameters`) or unset (`unset-parameters`).')
   }
 
   const application = await client.getApp(app);
@@ -29818,6 +29851,7 @@ async function setParameters(client, app, { parameters, sourceName, sourcePositi
   const source = selectSource(spec, { sourceName, sourcePosition });
 
   applyHelmParameters(source, params);
+  removeHelmParameters(source, unset);
 
   for (const { name, value } of params) {
     // Secret-looking values are registered so GitHub redacts them everywhere in
@@ -29826,51 +29860,44 @@ async function setParameters(client, app, { parameters, sourceName, sourcePositi
     if (secret && value) setSecret(value);
     log(`set ${name}=${secret ? MASK : value}`);
   }
+  for (const name of unset) {
+    log(`unset ${name}`);
+  }
 
   await client.updateSpec(app, spec);
   log(`Updated spec for ${app}`);
 }
 
+/** Headline like "Set 2 parameters and unset 1 parameter on <app>." */
+function changeHeadline(setCount, unsetCount, link) {
+  const noun = (n) => `${n} parameter${n === 1 ? '' : 's'}`;
+  const parts = [];
+  if (setCount) parts.push(`Set ${noun(setCount)}`);
+  if (unsetCount) parts.push(`${parts.length ? 'unset' : 'Unset'} ${noun(unsetCount)}`);
+  return `**${parts.join(' and ')} on ${link}.**`
+}
+
 async function run$9(client, app) {
   const parameters = getInput('parameters');
+  const unsetParameters = getInput('unset-parameters');
   await setParameters(client, app, {
     parameters,
+    unsetParameters,
     sourceName: getInput('source-name'),
     sourcePosition: getInput('source-position')
   });
 
   const params = toParams(parameters);
+  const unset = parseList(unsetParameters);
+  const rows = [
+    ...params.map((p) => [code(p.name), code(isSecretName(p.name) ? MASK : p.value)]),
+    ...unset.map((name) => [code(name), 'removed'])
+  ];
   await writeSummary('ArgoCD Set', [
-    `**Set ${params.length} parameter${params.length === 1 ? '' : 's'} on ${appLink(app, client)}.**`,
+    changeHeadline(params.length, unset.length, appLink(app, client)),
     '',
-    table(
-      ['Parameter', 'Value'],
-      params.map((p) => [code(p.name), code(isSecretName(p.name) ? MASK : p.value)])
-    )
+    table(['Parameter', 'Value'], rows)
   ]);
-}
-
-/** Resolve after `ms` milliseconds. Shared by the polling loops. */
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/**
- * Render a managed/status resource as `Kind/namespace/name` (namespace omitted
- * for cluster-scoped resources). Shared by the diff and restart log output.
- */
-function resourceId(r) {
-  return `${r.kind}/${r.namespace ? `${r.namespace}/` : ''}${r.name}`
-}
-
-/**
- * Split a newline/comma-separated input into a trimmed, non-empty list,
- * dropping `#` comment lines. Used for sync-options and similar list inputs.
- */
-function parseList(raw) {
-  if (!raw) return []
-  return String(raw)
-    .split(/[\n,]/)
-    .map((s) => s.trim())
-    .filter((s) => s && !s.startsWith('#'))
 }
 
 /**
@@ -30370,12 +30397,14 @@ function buildSyncBody({
   applyOutOfSyncOnly = false,
   syncOptions = [],
   strategy = '',
-  revision = ''
+  revision = '',
+  resources = []
 } = {}) {
   const body = {};
   if (prune) body.prune = true;
   if (dryRun) body.dryRun = true;
   if (revision) body.revision = revision;
+  if (resources.length > 0) body.resources = resources;
 
   // Boolean conveniences map onto the same string sync options the CLI sends.
   // They are appended *after* the raw `syncOptions` so that, on a duplicate key,
@@ -30455,6 +30484,28 @@ function warnUnknownSyncOptions(options) {
   }
 }
 
+/**
+ * Parse the `resources` input into ArgoCD SyncOperationResource entries that
+ * scope a sync to specific resources. Each newline/comma item is
+ * `[group:]kind:name` (mirrors `argocd app sync --resource`); the group is blank
+ * for core resources, given as either `:Service:web` or just `Service:web`.
+ */
+function parseResources(raw) {
+  return parseList(raw).map((item) => {
+    const parts = item.split(':').map((s) => s.trim());
+    const spec =
+      parts.length === 2
+        ? { group: '', kind: parts[0], name: parts[1] }
+        : parts.length === 3
+          ? { group: parts[0], kind: parts[1], name: parts[2] }
+          : null;
+    if (!spec || !spec.kind || !spec.name) {
+      throw new Error(`Invalid resource "${item}" - expected [group:]kind:name (e.g. apps:Deployment:web or :Service:web)`)
+    }
+    return spec
+  })
+}
+
 /** Read the sync options shared by the `sync` and `deploy` commands. */
 function readSyncOptions() {
   return {
@@ -30466,7 +30517,8 @@ function readSyncOptions() {
     syncOptions: parseList(getInput('sync-options')),
     strategy: getInput('strategy').trim(),
     dryRun: parseBool(getInput('dry-run'), false),
-    revision: getInput('revision').trim()
+    revision: getInput('revision').trim(),
+    resources: parseResources(getInput('resources'))
   }
 }
 

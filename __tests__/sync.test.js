@@ -3,7 +3,7 @@ import * as core from '../__fixtures__/core.js'
 
 jest.unstable_mockModule('@actions/core', () => core)
 
-const { buildSyncBody, consolidateSyncOptions, warnUnknownSyncOptions } =
+const { buildSyncBody, consolidateSyncOptions, warnUnknownSyncOptions, parseResources } =
   await import('../src/commands/sync.js')
 
 describe('buildSyncBody', () => {
@@ -75,6 +75,44 @@ describe('buildSyncBody', () => {
       serverSide: true
     })
     expect(body.syncOptions.items).toEqual(['ServerSideApply=true'])
+  })
+
+  it('scopes the sync to specific resources when given', () => {
+    const resources = [{ group: 'apps', kind: 'Deployment', name: 'web' }]
+    expect(buildSyncBody({ resources })).toEqual({ resources })
+  })
+
+  it('omits resources when the list is empty', () => {
+    expect(buildSyncBody({ resources: [] })).toEqual({})
+  })
+})
+
+describe('parseResources', () => {
+  it('parses group:kind:name triples', () => {
+    expect(parseResources('apps:Deployment:web')).toEqual([
+      { group: 'apps', kind: 'Deployment', name: 'web' }
+    ])
+  })
+
+  it('treats a kind:name pair as a core (groupless) resource', () => {
+    expect(parseResources('Service:web')).toEqual([{ group: '', kind: 'Service', name: 'web' }])
+    expect(parseResources(':Service:web')).toEqual([{ group: '', kind: 'Service', name: 'web' }])
+  })
+
+  it('parses a newline/comma list and trims', () => {
+    expect(parseResources('apps:Deployment:web, :Service:web')).toEqual([
+      { group: 'apps', kind: 'Deployment', name: 'web' },
+      { group: '', kind: 'Service', name: 'web' }
+    ])
+  })
+
+  it('returns [] for empty input', () => {
+    expect(parseResources('')).toEqual([])
+  })
+
+  it('throws on a malformed entry', () => {
+    expect(() => parseResources('justname')).toThrow(/\[group:\]kind:name/)
+    expect(() => parseResources('a:b:c:d')).toThrow(/\[group:\]kind:name/)
   })
 })
 

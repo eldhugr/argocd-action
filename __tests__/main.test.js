@@ -186,6 +186,23 @@ describe('set', () => {
       value: 'deadbeef'
     })
   })
+
+  it('removes parameters named in unset-parameters', async () => {
+    setInputs(
+      baseInputs({
+        command: 'set',
+        'unset-parameters': 'comments.release.refName'
+      })
+    )
+
+    await run()
+
+    expect(core.setFailed).not.toHaveBeenCalled()
+    const params = interactions.puts[0].spec.source.helm.parameters
+    expect(params).not.toContainEqual(
+      expect.objectContaining({ name: 'comments.release.refName' })
+    )
+  })
 })
 
 describe('diff', () => {
@@ -504,6 +521,25 @@ describe('sync', () => {
 
     expect(core.setFailed).not.toHaveBeenCalled()
     expect(interactions.syncs[0].body).toMatchObject({ dryRun: true })
+  })
+
+  it('scopes the sync to the resources listed in `resources`', async () => {
+    setInputs(
+      baseInputs({
+        command: 'sync',
+        refresh: 'false',
+        timeout: '30',
+        resources: 'apps:Deployment:comments\n:Service:comments'
+      })
+    )
+
+    await run()
+
+    expect(core.setFailed).not.toHaveBeenCalled()
+    expect(interactions.syncs[0].body.resources).toEqual([
+      { group: 'apps', kind: 'Deployment', name: 'comments' },
+      { group: '', kind: 'Service', name: 'comments' }
+    ])
   })
 })
 

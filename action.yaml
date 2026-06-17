@@ -55,6 +55,9 @@ inputs:
   parameters:
     description: 'Newline-separated Helm parameters to set, each as name=value (command: set)'
     required: false
+  unset-parameters:
+    description: 'Newline/comma-separated Helm parameter names to remove from the application. May be combined with `parameters` to set and unset in one call (command: set)'
+    required: false
   source-name:
     description: 'For multi-source apps: the source name to apply parameters to (command: set)'
     required: false
@@ -95,6 +98,9 @@ inputs:
     default: 'false'
   revision:
     description: 'Target Git revision to sync to (command: sync), or the history revision to roll back to (command: rollback)'
+    required: false
+  resources:
+    description: 'Limit the sync to specific resources, one per line or comma-separated, each as [group:]kind:name (e.g. apps:Deployment:web or :Service:web). Mirrors `argocd app sync --resource` (command: sync, deploy)'
     required: false
 
   # --- diff ---

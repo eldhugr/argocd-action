@@ -19,12 +19,14 @@ export function buildSyncBody({
   applyOutOfSyncOnly = false,
   syncOptions = [],
   strategy = '',
-  revision = ''
+  revision = '',
+  resources = []
 } = {}) {
   const body = {}
   if (prune) body.prune = true
   if (dryRun) body.dryRun = true
   if (revision) body.revision = revision
+  if (resources.length > 0) body.resources = resources
 
   // Boolean conveniences map onto the same string sync options the CLI sends.
   // They are appended *after* the raw `syncOptions` so that, on a duplicate key,
@@ -104,6 +106,28 @@ export function warnUnknownSyncOptions(options) {
   }
 }
 
+/**
+ * Parse the `resources` input into ArgoCD SyncOperationResource entries that
+ * scope a sync to specific resources. Each newline/comma item is
+ * `[group:]kind:name` (mirrors `argocd app sync --resource`); the group is blank
+ * for core resources, given as either `:Service:web` or just `Service:web`.
+ */
+export function parseResources(raw) {
+  return parseList(raw).map((item) => {
+    const parts = item.split(':').map((s) => s.trim())
+    const spec =
+      parts.length === 2
+        ? { group: '', kind: parts[0], name: parts[1] }
+        : parts.length === 3
+          ? { group: parts[0], kind: parts[1], name: parts[2] }
+          : null
+    if (!spec || !spec.kind || !spec.name) {
+      throw new Error(`Invalid resource "${item}" - expected [group:]kind:name (e.g. apps:Deployment:web or :Service:web)`)
+    }
+    return spec
+  })
+}
+
 /** Read the sync options shared by the `sync` and `deploy` commands. */
 export function readSyncOptions() {
   return {
@@ -115,7 +139,8 @@ export function readSyncOptions() {
     syncOptions: parseList(core.getInput('sync-options')),
     strategy: core.getInput('strategy').trim(),
     dryRun: parseBool(core.getInput('dry-run'), false),
-    revision: core.getInput('revision').trim()
+    revision: core.getInput('revision').trim(),
+    resources: parseResources(core.getInput('resources'))
   }
 }
 
