@@ -1,3 +1,6 @@
+import * as core from '@actions/core'
+import { sleep } from './util.js'
+
 /**
  * Disable TLS certificate verification process-wide. Used for the `insecure`
  * option; relies on the action running in its own short-lived process. Avoids a
@@ -7,16 +10,119 @@ function disableTlsVerification() {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
 }
 
+// --- Request resilience (timeout + bounded retry) --------------------------
+
+/** Per-request timeout and retry defaults for the ArgoCD HTTP gateway. */
+const DEFAULT_TIMEOUT_MS = 30000
+const DEFAULT_MAX_RETRIES = 3
+const DEFAULT_RETRY_BASE_MS = 500
+const RETRY_CAP_MS = 5000
+
+/**
+ * Gateway/overload statuses that mean the request almost certainly never reached
+ * (or was rejected before) the ArgoCD backend, so they are safe to retry for any
+ * method. 500 is ambiguous and only retried for idempotent methods.
+ */
+const ALWAYS_RETRY_STATUS = new Set([429, 502, 503, 504])
+
+/** GET/PUT/DELETE are idempotent - safe to retry on a transport error too. */
+function isIdempotent(method) {
+  return method === 'GET' || method === 'PUT' || method === 'DELETE' || method === 'HEAD'
+}
+
+function isRetryableStatus(status, idempotent) {
+  if (ALWAYS_RETRY_STATUS.has(status)) return true
+  return idempotent && status === 500
+}
+
+/** Exponential backoff with mild jitter, capped at RETRY_CAP_MS. */
+function backoffDelay(attempt, base) {
+  const exp = Math.min(RETRY_CAP_MS, base * 2 ** attempt)
+  return exp + Math.floor(Math.random() * 250)
+}
+
+/** Honour a `Retry-After` (seconds) header, capped so it can't stall the job. */
+function retryAfterMs(res) {
+  const header = res.headers?.get?.('retry-after')
+  const secs = header ? Number(header) : NaN
+  return Number.isFinite(secs) && secs > 0 ? Math.min(2 * RETRY_CAP_MS, secs * 1000) : 0
+}
+
+/** fetch() with an AbortController deadline; rejects with AbortError on timeout. */
+async function fetchWithTimeout(url, init, timeoutMs) {
+  if (!timeoutMs) return fetch(url, init)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...init, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * fetch() wrapper adding a per-request timeout and a bounded, backed-off retry on
+ * transient failures: gateway 5xx/429 for any method, plus timeouts and network
+ * errors for idempotent methods. Returns the final Response (the caller formats
+ * non-ok bodies into errors); throws only on a transport error it won't retry.
+ */
+async function fetchWithRetry(url, init, opts = {}) {
+  const {
+    method = 'GET',
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    maxRetries = DEFAULT_MAX_RETRIES,
+    retryBaseMs = DEFAULT_RETRY_BASE_MS,
+    label
+  } = opts
+  const idempotent = isIdempotent(method)
+  const what = label || `${method} ${url}`
+  for (let attempt = 0; ; attempt++) {
+    let res
+    try {
+      res = await fetchWithTimeout(url, init, timeoutMs)
+    } catch (err) {
+      const timedOut = err && err.name === 'AbortError'
+      if (idempotent && attempt < maxRetries) {
+        const delay = backoffDelay(attempt, retryBaseMs)
+        core.info(`ArgoCD ${what} ${timedOut ? `timed out after ${timeoutMs}ms` : `request error (${err.message})`}; retrying in ${delay}ms (${attempt + 1}/${maxRetries}).`)
+        await sleep(delay)
+        continue
+      }
+      if (timedOut) throw new Error(`ArgoCD ${what} timed out after ${timeoutMs}ms.`)
+      throw err
+    }
+    if (res.ok) return res
+    if (isRetryableStatus(res.status, idempotent) && attempt < maxRetries) {
+      const delay = Math.max(backoffDelay(attempt, retryBaseMs), retryAfterMs(res))
+      core.info(`ArgoCD ${what} returned ${res.status}; retrying in ${delay}ms (${attempt + 1}/${maxRetries}).`)
+      await sleep(delay)
+      continue
+    }
+    return res
+  }
+}
+
 /**
  * Thin client over the ArgoCD REST gateway (the same HTTP API the argocd CLI
  * talks to via grpc-web). All calls hit `${baseUrl}/api/v1/...` and authenticate
  * with a Bearer token.
  */
 export class ArgoClient {
-  constructor({ baseUrl, token, insecure = false, appNamespace = '' }) {
+  constructor({
+    baseUrl,
+    token,
+    insecure = false,
+    appNamespace = '',
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    maxRetries = DEFAULT_MAX_RETRIES,
+    retryBaseMs = DEFAULT_RETRY_BASE_MS
+  }) {
     this.baseUrl = baseUrl
     this.token = token
     this.appNamespace = appNamespace
+    this.timeoutMs = timeoutMs
+    this.maxRetries = maxRetries
+    this.retryBaseMs = retryBaseMs
     if (insecure) disableTlsVerification()
   }
 
@@ -48,14 +154,18 @@ export class ArgoClient {
     // `--user argo-cd-cli:` → HTTP Basic auth with an empty secret.
     const basic = Buffer.from(`${clientId}:`).toString('base64')
 
-    const res = await fetch(`${baseUrl}/api/dex/token`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Basic ${basic}`,
-        'Content-Type': 'application/x-www-form-urlencoded'
+    const res = await fetchWithRetry(
+      `${baseUrl}/api/dex/token`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${basic}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: params.toString()
       },
-      body: params.toString()
-    })
+      { method: 'POST', label: 'POST /api/dex/token' }
+    )
     if (!res.ok) {
       const body = await res.text()
       throw new Error(`OIDC token exchange failed (${res.status}): ${body}`)
@@ -70,11 +180,15 @@ export class ArgoClient {
   /** Obtain a session token from username/password and return a client using it. */
   static async login({ baseUrl, username, password, insecure = false, appNamespace = '' }) {
     if (insecure) disableTlsVerification()
-    const res = await fetch(`${baseUrl}/api/v1/session`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password })
-    })
+    const res = await fetchWithRetry(
+      `${baseUrl}/api/v1/session`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      },
+      { method: 'POST', label: 'POST /api/v1/session' }
+    )
     if (!res.ok) {
       const body = await res.text()
       throw new Error(`Login failed (${res.status}): ${body}`)
@@ -107,7 +221,17 @@ export class ArgoClient {
       payload = JSON.stringify(body)
     }
 
-    const res = await fetch(url, { method, headers, body: payload })
+    const res = await fetchWithRetry(
+      url,
+      { method, headers, body: payload },
+      {
+        method,
+        timeoutMs: this.timeoutMs,
+        maxRetries: this.maxRetries,
+        retryBaseMs: this.retryBaseMs,
+        label: `${method} ${path}`
+      }
+    )
 
     const text = await res.text()
     if (!res.ok) {

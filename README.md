@@ -19,6 +19,7 @@ talks to the same HTTP gateway the `argocd` CLI uses
 - [Inputs](#inputs)
 - [Outputs](#outputs)
 - [How diffing works](#how-diffing-works)
+- [Connection reliability](#connection-reliability)
 - [Development](#development)
 
 ## Quick start
@@ -504,6 +505,19 @@ server-computed `normalizedLiveState` (live, with `ignoreDifferences` and
 normalisers already applied) vs `predictedLiveState` (target) from the
 `managed-resources` endpoint, and reports a structural difference between them.
 This faithfully reproduces the diff / no-diff _decision_ the pipeline depends on.
+
+## Connection reliability
+
+Every API call has a 30s per-request timeout and is retried with exponential
+backoff on transient failures, so a single gateway blip doesn't fail the whole
+step. Gateway/overload responses (`429`, `502`, `503`, `504`) are retried for any
+method, since they mean the request never reached the ArgoCD backend; timeouts
+and network errors are retried only for idempotent calls (the `GET` reads and the
+`PUT`/`DELETE` writes), never for a `POST` (e.g. `sync`), which could otherwise be
+applied twice. A `Retry-After` header is honoured. Retries are logged, and after
+the attempts are exhausted the underlying error is surfaced as normal. These
+limits are internal (no inputs); the `timeout` input is unrelated - it bounds how
+long `wait`/`deploy` poll for `Synced`/`Healthy`.
 
 ## Development
 
