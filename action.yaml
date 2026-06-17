@@ -58,6 +58,9 @@ inputs:
   unset-parameters:
     description: 'Newline/comma-separated Helm parameter names to remove from the application. May be combined with `parameters` to set and unset in one call (command: set)'
     required: false
+  kustomize-images:
+    description: 'Newline/comma-separated Kustomize image overrides to set on the application, each in `argocd app set --kustomize-image` form (e.g. nginx=nginx:1.21, web:v2, app@sha256:...). An override replaces an existing one for the same image (command: set)'
+    required: false
   source-name:
     description: 'For multi-source apps: the source name to apply parameters to (command: set)'
     required: false

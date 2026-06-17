@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@jest/globals'
-import { parseParameters, applyHelmParameters, removeHelmParameters } from '../src/commands/set.js'
+import { parseParameters, applyHelmParameters, removeHelmParameters, applyKustomizeImages } from '../src/commands/set.js'
 import { isSecretName } from '../src/summary.js'
 
 describe('parseParameters', () => {
@@ -51,6 +51,38 @@ describe('applyHelmParameters', () => {
       { name: 'a', value: 'new' },
       { name: 'b', value: '2' }
     ])
+  })
+
+  it('is a no-op for empty params and adds no helm block', () => {
+    const source = {}
+    applyHelmParameters(source, [])
+    expect(source).toEqual({})
+  })
+})
+
+describe('applyKustomizeImages', () => {
+  it('adds new image overrides', () => {
+    const source = {}
+    applyKustomizeImages(source, ['nginx=nginx:1.21'])
+    expect(source.kustomize.images).toEqual(['nginx=nginx:1.21'])
+  })
+
+  it('replaces an existing override for the same image (rename form)', () => {
+    const source = { kustomize: { images: ['nginx=nginx:1.20', 'redis:6'] } }
+    applyKustomizeImages(source, ['nginx=nginx:1.21'])
+    expect(source.kustomize.images).toEqual(['nginx=nginx:1.21', 'redis:6'])
+  })
+
+  it('replaces by name for the tag-only form, and appends new images', () => {
+    const source = { kustomize: { images: ['redis:6'] } }
+    applyKustomizeImages(source, ['redis:7', 'busybox:1.36'])
+    expect(source.kustomize.images).toEqual(['redis:7', 'busybox:1.36'])
+  })
+
+  it('is a no-op for empty input and adds no kustomize block', () => {
+    const source = {}
+    applyKustomizeImages(source, [])
+    expect(source).toEqual({})
   })
 })
 

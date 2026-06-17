@@ -60,7 +60,7 @@ use; the others are the individual steps it composes, exposed for standalone use
 | command        | what it does                                                                          |
 |----------------|---------------------------------------------------------------------------------------|
 | `deploy`       | Umbrella: `set` → `diff` → (sync if diff / restart if not) → `wait`. One app or many. |
-| `set`          | Set Helm parameters on an application (`spec.source.helm.parameters`).                |
+| `set`          | Set/unset Helm parameters or Kustomize images on an application's source.             |
 | `diff`         | Report whether the live state differs from target (sets a `diff` output).             |
 | `sync`         | Sync the app with full sync options (prune, force, server-side, …), then wait.        |
 | `wait`         | Poll until the app is `Synced` + `Healthy` with no in-flight operation.               |
@@ -427,11 +427,12 @@ Override `oidc-client-id` (default `argo-cd-cli`), `oidc-connector-id` (default
 
 ### Set parameters - `set`, `deploy`
 
-| input                             | values                 | description                                       |
-|-----------------------------------|------------------------|---------------------------------------------------|
-| `parameters`                      | `name=value` per line  | Helm parameters to set                            |
-| `unset-parameters`                | name per line/comma    | Helm parameter names to remove (set/unset in one) |
-| `source-name` / `source-position` | string / 1-based index | Target source for multi-source apps               |
+| input                             | values                        | description                                       |
+|-----------------------------------|-------------------------------|---------------------------------------------------|
+| `parameters`                      | `name=value` per line         | Helm parameters to set                            |
+| `unset-parameters`                | name per line/comma           | Helm parameter names to remove (set/unset in one) |
+| `kustomize-images`                | image override per line/comma | Kustomize images to set (`--kustomize-image`)     |
+| `source-name` / `source-position` | string / 1-based index        | Target source for multi-source apps               |
 
 Values for secret-looking parameter names (containing `password`, `token`,
 `secret`, `credential`, `auth`, ... or ending in `key`) are masked as `***` in
@@ -441,7 +442,15 @@ the logs too.
 `unset-parameters` removes Helm parameters by name (one per line or comma-separated,
 names only). It can be combined with `parameters` in a single `set` to add some and
 remove others; removing a name that isn't set is a no-op. At least one of
-`parameters` / `unset-parameters` must be provided.
+`parameters` / `unset-parameters` / `kustomize-images` must be provided.
+
+For Kustomize applications, `kustomize-images` sets image overrides on
+`spec.source.kustomize.images`, one per line or comma-separated, each in the same
+form as `argocd app set --kustomize-image` (`name=newName:tag`, `name:tag`,
+`name@digest`, ...). An override replaces an existing one targeting the same image
+(matched the way ArgoCD matches them) rather than duplicating it. Helm parameters
+and Kustomize images are independent inputs - use whichever matches the app's
+source type; they target the same selected source for multi-source apps.
 
 ### Sync - `sync`, `deploy` (sync step), some apply to `rollback`
 

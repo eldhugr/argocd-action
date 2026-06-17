@@ -203,6 +203,27 @@ describe('set', () => {
       expect.objectContaining({ name: 'comments.release.refName' })
     )
   })
+
+  it('sets kustomize images via PUT spec, replacing an existing override by image name', async () => {
+    appResponse = (name) => ({
+      metadata: { name, annotations: {} },
+      spec: { source: { repoURL: 'x', kustomize: { images: ['nginx=nginx:1.20'] } } }
+    })
+    setInputs(
+      baseInputs({
+        command: 'set',
+        'kustomize-images': 'nginx=nginx:1.21\nbusybox=busybox:1.36'
+      })
+    )
+
+    await run()
+
+    expect(core.setFailed).not.toHaveBeenCalled()
+    expect(interactions.puts[0].spec.source.kustomize.images).toEqual([
+      'nginx=nginx:1.21',
+      'busybox=busybox:1.36'
+    ])
+  })
 })
 
 describe('diff', () => {
