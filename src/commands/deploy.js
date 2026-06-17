@@ -47,6 +47,7 @@ function readSettings() {
     timeout: parseNumber(core.getInput('timeout'), 600),
     syncBody: buildSyncBody(readSyncOptions()),
     restartKinds: parseRestartKinds(core.getInput('restart')),
+    unified: parseBool(core.getInput('unified-diff'), false),
     forSync: parseBool(core.getInput('wait-for-sync'), true),
     forHealth: parseBool(core.getInput('wait-for-health'), true),
     forOperation: parseBool(core.getInput('wait-for-operation'), true)
@@ -111,7 +112,7 @@ async function deployOne(client, app, settings) {
 
   // 2. Refresh + diff.
   const diff = await computeDiff(client, app, { refresh: settings.refresh, log })
-  logDiff(app, diff, log)
+  logDiff(app, diff, { log, unified: settings.unified })
   result.diff = diff.hasDiff
 
   // 3. Rendered diff → sync. No diff → restart the chosen workloads (if any),

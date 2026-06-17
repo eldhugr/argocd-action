@@ -1,5 +1,5 @@
 import * as core from '@actions/core'
-import { diffManagedResources } from '../diff.js'
+import { diffManagedResources, renderUnifiedDiff, renderFieldValue } from '../diff.js'
 import { parseBool } from '../config.js'
 import { sleep, resourceId } from '../util.js'
 import { appLink, code, table, writeSummary } from '../summary.js'
@@ -37,8 +37,12 @@ export async function computeDiff(client, app, { refresh = 'normal', log = core.
   return diffManagedResources(managed.items || [])
 }
 
-/** Emit a human-readable summary of a computeDiff() result. */
-export function logDiff(app, { hasDiff, resources }, log = core.info) {
+/**
+ * Emit a human-readable summary of a computeDiff() result to the job log. By
+ * default each changed field is listed as `type: path`; with `unified: true`
+ * the old/new values are shown as `-`/`+` lines (Secret values masked).
+ */
+export function logDiff(app, { hasDiff, resources }, { log = core.info, unified = false } = {}) {
   const changed = resources.filter((r) => r.changed)
   if (!hasDiff) {
     log(`No differences for ${app}.`)
@@ -47,8 +51,18 @@ export function logDiff(app, { hasDiff, resources }, log = core.info) {
   log(`Found differences in ${changed.length} resource(s) for ${app}:`)
   for (const r of changed) {
     log(`  ${r.status.padEnd(8)} ${resourceId(r)}`)
+    const secret = r.kind === 'Secret'
     for (const p of r.paths.slice(0, 25)) {
-      log(`      ${p.type}: ${p.path}`)
+      if (!unified) {
+        log(`      ${p.type}: ${p.path}`)
+      } else if (p.type === 'added') {
+        log(`      + ${p.path}: ${renderFieldValue(p.after, { secret })}`)
+      } else if (p.type === 'removed') {
+        log(`      - ${p.path}: ${renderFieldValue(p.before, { secret })}`)
+      } else {
+        log(`      - ${p.path}: ${renderFieldValue(p.before, { secret })}`)
+        log(`      + ${p.path}: ${renderFieldValue(p.after, { secret })}`)
+      }
     }
     if (r.paths.length > 25) {
       log(`      ... and ${r.paths.length - 25} more`)
@@ -59,13 +73,14 @@ export function logDiff(app, { hasDiff, resources }, log = core.info) {
 export async function run(client, app) {
   const refresh = core.getInput('refresh') || 'normal'
   const failOnDiff = parseBool(core.getInput('fail-on-diff'), false)
+  const unified = parseBool(core.getInput('unified-diff'), false)
 
   const result = await computeDiff(client, app, { refresh })
-  logDiff(app, result)
+  logDiff(app, result, { unified })
 
   core.setOutput('diff', String(result.hasDiff))
 
-  await reportDiff(client, app, result)
+  await reportDiff(client, app, result, { unified })
 
   if (result.hasDiff && failOnDiff) {
     core.setFailed(`Application ${app} has differences.`)
@@ -80,7 +95,7 @@ function statusLabel(status) {
 }
 
 /** Write the diff result to the GitHub step summary. */
-async function reportDiff(client, app, result) {
+async function reportDiff(client, app, result, { unified = false } = {}) {
   if (!result.hasDiff) {
     await writeSummary('ArgoCD Diff', [`**No differences for ${appLink(app, client)}.**`])
     return
@@ -92,9 +107,15 @@ async function reportDiff(client, app, result) {
     statusLabel(r.status),
     r.paths.length > 0 ? String(r.paths.length) : '-'
   ])
-  await writeSummary('ArgoCD Diff', [
+  const lines = [
     `**${changed.length} ${plural} differ for ${appLink(app, client)}.**`,
     '',
     table(['Resource', 'Change', 'Changed fields'], rows)
-  ])
+  ]
+  // Optional field-level +/- rendering, in a ```diff fence so GitHub colours it.
+  if (unified) {
+    const body = renderUnifiedDiff(changed)
+    if (body) lines.push('', '```diff', body, '```')
+  }
+  await writeSummary('ArgoCD Diff', lines)
 }

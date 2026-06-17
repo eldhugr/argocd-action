@@ -79,6 +79,15 @@ application name links to its ArgoCD page. When a job runs several steps, each
 block is self-contained and separated by a horizontal rule, so the steps read
 cleanly stacked together.
 
+For `diff`, set `unified-diff: true` to add a field-level `+`/`-` diff in a
+`diff`-fenced code block beneath the resource table - GitHub colours the old/new
+values, so a reviewer sees exactly what changed (e.g. the image tag) rather than
+just a count. The same flag also expands the job log itself, from a `type: path`
+listing to `-`/`+` value lines under each resource. `deploy` honours the flag
+too, expanding the per-application diff it logs (its summary stays the status
+table). Values of `Secret` resources are masked (`***`) everywhere; only the
+changed key is named, never its value.
+
 ### `deploy` - the umbrella command
 
 `deploy` replaces a whole "update image settings and deploy" shell step:
@@ -433,6 +442,7 @@ the logs too.
 |------------------------------------------------------------|-------------------------------|----------|---------------------------------------------|
 | `refresh`                                                  | `false` \| `normal` \| `hard` | `normal` | Refresh the app before diff/wait/get        |
 | `fail-on-diff`                                             | `true` \| `false`             | `false`  | (`diff`) fail the step when a diff is found |
+| `unified-diff`                                             | `true` \| `false`             | `false`  | (`diff`, `deploy`) show field-level `+`/`-` diff values (in the `diff` summary and both commands' job log) |
 | `timeout`                                                  | seconds (integer)             | `600`    | Max time to wait for Synced/Healthy         |
 | `wait-for-sync` / `wait-for-health` / `wait-for-operation` | `true` \| `false`             | `true`   | Conditions to wait on                       |
 
@@ -500,5 +510,6 @@ before committing**.
 
 ## Roadmap
 
-- Optional unified (pretty) diff rendering for human-readable PR comments.
+- Post the diff to a pull request as a comment (the unified diff rendering it
+  would use already ships - see `unified-diff`).
 - Resource-scoped sync (`--resource group:kind:name`) and `unset` for parameters.

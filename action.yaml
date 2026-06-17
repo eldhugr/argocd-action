@@ -106,6 +106,10 @@ inputs:
     description: 'If true, the diff command fails the step when differences are found (command: diff)'
     required: false
     default: 'false'
+  unified-diff:
+    description: 'Render a unified (+/-) field-level diff with old/new values. For `diff`: in the step summary (beneath the resource table) and the job log. For `deploy`: in the per-application job log. Values of Secret resources are masked. (command: diff, deploy)'
+    required: false
+    default: 'false'
 
   # --- wait ---
   timeout:

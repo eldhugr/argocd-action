@@ -222,6 +222,46 @@ describe('diff', () => {
     expect(core.setFailed).not.toHaveBeenCalled()
     expect(core.setOutput).toHaveBeenCalledWith('diff', 'false')
   })
+
+  it('renders a unified diff block in the summary when unified-diff is set', async () => {
+    setInputs(baseInputs({ command: 'diff', refresh: 'false', 'unified-diff': 'true' }))
+
+    await run()
+
+    const summary = core.summary.addRaw.mock.calls.map((c) => c[0]).join('\n')
+    expect(summary).toContain('```diff')
+    expect(summary).toContain('- spec.image: app:old')
+    expect(summary).toContain('+ spec.image: app:new')
+  })
+
+  it('enriches the job log with -/+ values when unified-diff is set', async () => {
+    setInputs(baseInputs({ command: 'diff', refresh: 'false', 'unified-diff': 'true' }))
+
+    await run()
+
+    const log = core.info.mock.calls.map((c) => c[0]).join('\n')
+    expect(log).toContain('      - spec.image: app:old')
+    expect(log).toContain('      + spec.image: app:new')
+  })
+
+  it('keeps the terse "type: path" job log by default', async () => {
+    setInputs(baseInputs({ command: 'diff', refresh: 'false' }))
+
+    await run()
+
+    const log = core.info.mock.calls.map((c) => c[0]).join('\n')
+    expect(log).toContain('      changed: spec.image')
+    expect(log).not.toContain('app:old')
+  })
+
+  it('omits the unified diff block by default', async () => {
+    setInputs(baseInputs({ command: 'diff', refresh: 'false' }))
+
+    await run()
+
+    const summary = core.summary.addRaw.mock.calls.map((c) => c[0]).join('\n')
+    expect(summary).not.toContain('```diff')
+  })
 })
 
 describe('wait', () => {
@@ -291,6 +331,19 @@ describe('deploy (single app)', () => {
     expect(interactions.restarts).toHaveLength(0)
     expect(core.setOutput).toHaveBeenCalledWith('diff', 'true')
     expect(core.setOutput).toHaveBeenCalledWith('sync-status', 'Synced')
+  })
+
+  it('honors unified-diff in the per-app job log', async () => {
+    managedResponse = diffItems()
+    setInputs(
+      baseInputs({ command: 'deploy', refresh: 'false', timeout: '30', 'unified-diff': 'true' })
+    )
+
+    await run()
+
+    const log = core.info.mock.calls.map((c) => c[0]).join('\n')
+    expect(log).toContain('- spec.image: app:old')
+    expect(log).toContain('+ spec.image: app:new')
   })
 })
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@jest/globals'
-import { deepDiff, diffResource, diffManagedResources } from '../src/diff.js'
+import { deepDiff, diffResource, diffManagedResources, renderUnifiedDiff } from '../src/diff.js'
 
 describe('deepDiff', () => {
   it('produces no diff for identical objects regardless of key order', () => {
@@ -25,6 +25,14 @@ describe('deepDiff', () => {
     const diff = deepDiff([1, 2], [1, 2, 3])
     expect(diff).toHaveLength(1)
     expect(diff[0]).toMatchObject({ type: 'added', path: '[2]' })
+  })
+
+  it('captures before/after values per entry', () => {
+    const diff = deepDiff({ a: 1, b: 2 }, { a: 9, c: 3 })
+    const byPath = Object.fromEntries(diff.map((d) => [d.path, d]))
+    expect(byPath.a).toMatchObject({ type: 'changed', before: 1, after: 9 })
+    expect(byPath.b).toMatchObject({ type: 'removed', before: 2 })
+    expect(byPath.c).toMatchObject({ type: 'added', after: 3 })
   })
 })
 
@@ -108,5 +116,73 @@ describe('diffManagedResources', () => {
       }
     ])
     expect(out.hasDiff).toBe(false)
+  })
+})
+
+describe('renderUnifiedDiff', () => {
+  const modified = (kind = 'Deployment') =>
+    diffResource({
+      group: 'apps',
+      kind,
+      name: 'comments',
+      namespace: 'comments',
+      normalizedLiveState: JSON.stringify({ spec: { image: 'app:old', replicas: 2 } }),
+      predictedLiveState: JSON.stringify({ spec: { image: 'app:new', replicas: 2 } })
+    })
+
+  it('renders -/+ lines under a hunk header for a modified resource', () => {
+    const out = renderUnifiedDiff([modified()])
+    expect(out).toContain('@@ Deployment/comments/comments @@')
+    expect(out).toContain('- spec.image: app:old')
+    expect(out).toContain('+ spec.image: app:new')
+  })
+
+  it('skips unchanged resources and returns empty when nothing changed', () => {
+    const same = JSON.stringify({ spec: { image: 'app:x' } })
+    const res = diffResource({ kind: 'Deployment', name: 'x', normalizedLiveState: same, predictedLiveState: same })
+    expect(renderUnifiedDiff([res])).toBe('')
+  })
+
+  it('masks the values of Secret resources but still names the changed field', () => {
+    const out = renderUnifiedDiff([
+      diffResource({
+        kind: 'Secret',
+        name: 'creds',
+        namespace: 'comments',
+        normalizedLiveState: JSON.stringify({ data: { password: 'b2xk' } }),
+        predictedLiveState: JSON.stringify({ data: { password: 'bmV3' } })
+      })
+    ])
+    expect(out).toContain('data.password')
+    expect(out).toContain('- data.password: ***')
+    expect(out).toContain('+ data.password: ***')
+    expect(out).not.toContain('b2xk')
+    expect(out).not.toContain('bmV3')
+  })
+
+  it('summarises added and pruned resources on a single line', () => {
+    const added = diffResource({ kind: 'ConfigMap', name: 'new', normalizedLiveState: '', predictedLiveState: JSON.stringify({ data: { k: 'v' } }) })
+    const pruned = diffResource({ kind: 'ConfigMap', name: 'old', normalizedLiveState: JSON.stringify({ data: { k: 'v' } }), predictedLiveState: '' })
+    expect(renderUnifiedDiff([added])).toContain('@@ ConfigMap/new (added) @@')
+    expect(renderUnifiedDiff([added])).toContain('+ (resource created)')
+    expect(renderUnifiedDiff([pruned])).toContain('@@ ConfigMap/old (pruned) @@')
+    expect(renderUnifiedDiff([pruned])).toContain('- (resource deleted)')
+  })
+
+  it('caps the rendered fields per resource and notes the remainder', () => {
+    const live = {}
+    const target = {}
+    for (let i = 0; i < 5; i++) {
+      live[`f${i}`] = i
+      target[`f${i}`] = i + 100
+    }
+    const res = diffResource({
+      kind: 'ConfigMap',
+      name: 'big',
+      normalizedLiveState: JSON.stringify({ data: live }),
+      predictedLiveState: JSON.stringify({ data: target })
+    })
+    const out = renderUnifiedDiff([res], { maxFields: 2 })
+    expect(out).toContain('... and 3 more field(s)')
   })
 })

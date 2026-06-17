@@ -29850,6 +29850,29 @@ async function run$9(client, app) {
   ]);
 }
 
+/** Resolve after `ms` milliseconds. Shared by the polling loops. */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Render a managed/status resource as `Kind/namespace/name` (namespace omitted
+ * for cluster-scoped resources). Shared by the diff and restart log output.
+ */
+function resourceId(r) {
+  return `${r.kind}/${r.namespace ? `${r.namespace}/` : ''}${r.name}`
+}
+
+/**
+ * Split a newline/comma-separated input into a trimmed, non-empty list,
+ * dropping `#` comment lines. Used for sync-options and similar list inputs.
+ */
+function parseList(raw) {
+  if (!raw) return []
+  return String(raw)
+    .split(/[\n,]/)
+    .map((s) => s.trim())
+    .filter((s) => s && !s.startsWith('#'))
+}
+
 /**
  * Structural JSON diff used to reproduce `argocd app diff`'s diff / no-diff
  * decision. We compare the server-computed `normalizedLiveState` (live, with
@@ -29857,6 +29880,7 @@ async function run$9(client, app) {
  * `predictedLiveState` (target). This mirrors what the CLI renders, without
  * reimplementing ArgoCD's normalization engine - that work happens server-side.
  */
+
 
 function isObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v)
@@ -29873,8 +29897,8 @@ function deepDiff(live, target, path = '', acc = []) {
     const max = Math.max(live.length, target.length);
     for (let i = 0; i < max; i++) {
       const p = `${path}[${i}]`;
-      if (i >= live.length) acc.push({ path: p, type: 'added' });
-      else if (i >= target.length) acc.push({ path: p, type: 'removed' });
+      if (i >= live.length) acc.push({ path: p, type: 'added', after: target[i] });
+      else if (i >= target.length) acc.push({ path: p, type: 'removed', before: live[i] });
       else deepDiff(live[i], target[i], p, acc);
     }
     return acc
@@ -29886,15 +29910,15 @@ function deepDiff(live, target, path = '', acc = []) {
       const p = path ? `${path}.${key}` : key;
       const inLive = Object.prototype.hasOwnProperty.call(live, key);
       const inTarget = Object.prototype.hasOwnProperty.call(target, key);
-      if (!inLive) acc.push({ path: p, type: 'added' });
-      else if (!inTarget) acc.push({ path: p, type: 'removed' });
+      if (!inLive) acc.push({ path: p, type: 'added', after: target[key] });
+      else if (!inTarget) acc.push({ path: p, type: 'removed', before: live[key] });
       else deepDiff(live[key], target[key], p, acc);
     }
     return acc
   }
 
   // Primitives (or type mismatch) that aren't strictly equal.
-  acc.push({ path: path || '(root)', type: 'changed' });
+  acc.push({ path: path || '(root)', type: 'changed', before: live, after: target });
   return acc
 }
 
@@ -29956,27 +29980,82 @@ function diffManagedResources(items = []) {
   return { hasDiff: resources.some((r) => r.changed), resources }
 }
 
-/** Resolve after `ms` milliseconds. Shared by the polling loops. */
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// --- Unified (pretty) diff rendering ---------------------------------------
 
-/**
- * Render a managed/status resource as `Kind/namespace/name` (namespace omitted
- * for cluster-scoped resources). Shared by the diff and restart log output.
- */
-function resourceId(r) {
-  return `${r.kind}/${r.namespace ? `${r.namespace}/` : ''}${r.name}`
+/** Max field changes rendered per resource before the rest are summarised. */
+const DEFAULT_MAX_FIELDS = 50;
+/** Cap a single rendered value so one long field can't dominate the block. */
+const VALUE_CAP = 160;
+/** Placeholder for a masked Secret value (kept local to keep this module pure). */
+const SECRET_MASK = '***';
+
+/** Render a JSON value as a single-line string for a diff line. */
+function formatValue(v) {
+  if (v === undefined) return ''
+  if (v === null) return 'null'
+  if (typeof v === 'string') return v
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  try {
+    return JSON.stringify(v)
+  } catch {
+    return String(v)
+  }
+}
+
+/** Collapse newlines/runs of whitespace and cap the length of a value cell. */
+function oneLine(value, cap = VALUE_CAP) {
+  const s = String(value).replace(/\s*\n\s*/g, ' ');
+  return s.length > cap ? `${s.slice(0, cap)}...` : s
 }
 
 /**
- * Split a newline/comma-separated input into a trimmed, non-empty list,
- * dropping `#` comment lines. Used for sync-options and similar list inputs.
+ * Format one field value for a diff line. The values of `Secret` resources are
+ * masked so they never reach the step summary, a PR comment, or the job log.
+ * Shared by the unified summary renderer and the `diff` command's job log.
  */
-function parseList(raw) {
-  if (!raw) return []
-  return String(raw)
-    .split(/[\n,]/)
-    .map((s) => s.trim())
-    .filter((s) => s && !s.startsWith('#'))
+function renderFieldValue(value, { secret = false } = {}) {
+  return secret ? SECRET_MASK : oneLine(formatValue(value))
+}
+
+/**
+ * Render one resource's changes as unified-diff lines (`-` old / `+` new),
+ * headed by a `@@ Kind/namespace/name @@` hunk line. `Secret` values are masked
+ * so they never leak into the summary or a PR comment. Returns an array of lines.
+ */
+function renderResourceDiff(r, { maxFields = DEFAULT_MAX_FIELDS } = {}) {
+  const id = resourceId(r);
+  if (r.status === 'added') return [`@@ ${id} (added) @@`, '+ (resource created)']
+  if (r.status === 'pruned') return [`@@ ${id} (pruned) @@`, '- (resource deleted)']
+
+  const secret = r.kind === 'Secret';
+  const value = (x) => renderFieldValue(x, { secret });
+  const lines = [`@@ ${id} @@`];
+  for (const p of r.paths.slice(0, maxFields)) {
+    if (p.type === 'added') {
+      lines.push(`+ ${p.path}: ${value(p.after)}`);
+    } else if (p.type === 'removed') {
+      lines.push(`- ${p.path}: ${value(p.before)}`);
+    } else {
+      lines.push(`- ${p.path}: ${value(p.before)}`);
+      lines.push(`+ ${p.path}: ${value(p.after)}`);
+    }
+  }
+  if (r.paths.length > maxFields) {
+    lines.push(`  ... and ${r.paths.length - maxFields} more field(s)`);
+  }
+  return lines
+}
+
+/**
+ * Render the changed resources of a computeDiff() result as a single unified
+ * diff string (no code fence). Suitable for a ```diff block in the step summary
+ * or a PR comment. Unchanged resources are skipped; '' when nothing changed.
+ */
+function renderUnifiedDiff(resources = [], { maxFields = DEFAULT_MAX_FIELDS } = {}) {
+  return resources
+    .filter((r) => r.changed)
+    .map((r) => renderResourceDiff(r, { maxFields }).join('\n'))
+    .join('\n')
 }
 
 const REFRESH_ANNOTATION = 'argocd.argoproj.io/refresh';
@@ -30012,8 +30091,12 @@ async function computeDiff(client, app, { refresh = 'normal', log = info } = {})
   return diffManagedResources(managed.items || [])
 }
 
-/** Emit a human-readable summary of a computeDiff() result. */
-function logDiff(app, { hasDiff, resources }, log = info) {
+/**
+ * Emit a human-readable summary of a computeDiff() result to the job log. By
+ * default each changed field is listed as `type: path`; with `unified: true`
+ * the old/new values are shown as `-`/`+` lines (Secret values masked).
+ */
+function logDiff(app, { hasDiff, resources }, { log = info, unified = false } = {}) {
   const changed = resources.filter((r) => r.changed);
   if (!hasDiff) {
     log(`No differences for ${app}.`);
@@ -30022,8 +30105,18 @@ function logDiff(app, { hasDiff, resources }, log = info) {
   log(`Found differences in ${changed.length} resource(s) for ${app}:`);
   for (const r of changed) {
     log(`  ${r.status.padEnd(8)} ${resourceId(r)}`);
+    const secret = r.kind === 'Secret';
     for (const p of r.paths.slice(0, 25)) {
-      log(`      ${p.type}: ${p.path}`);
+      if (!unified) {
+        log(`      ${p.type}: ${p.path}`);
+      } else if (p.type === 'added') {
+        log(`      + ${p.path}: ${renderFieldValue(p.after, { secret })}`);
+      } else if (p.type === 'removed') {
+        log(`      - ${p.path}: ${renderFieldValue(p.before, { secret })}`);
+      } else {
+        log(`      - ${p.path}: ${renderFieldValue(p.before, { secret })}`);
+        log(`      + ${p.path}: ${renderFieldValue(p.after, { secret })}`);
+      }
     }
     if (r.paths.length > 25) {
       log(`      ... and ${r.paths.length - 25} more`);
@@ -30034,13 +30127,14 @@ function logDiff(app, { hasDiff, resources }, log = info) {
 async function run$8(client, app) {
   const refresh = getInput('refresh') || 'normal';
   const failOnDiff = parseBool(getInput('fail-on-diff'), false);
+  const unified = parseBool(getInput('unified-diff'), false);
 
   const result = await computeDiff(client, app, { refresh });
-  logDiff(app, result);
+  logDiff(app, result, { unified });
 
   setOutput('diff', String(result.hasDiff));
 
-  await reportDiff(client, app, result);
+  await reportDiff(client, app, result, { unified });
 
   if (result.hasDiff && failOnDiff) {
     setFailed(`Application ${app} has differences.`);
@@ -30055,7 +30149,7 @@ function statusLabel(status) {
 }
 
 /** Write the diff result to the GitHub step summary. */
-async function reportDiff(client, app, result) {
+async function reportDiff(client, app, result, { unified = false } = {}) {
   if (!result.hasDiff) {
     await writeSummary('ArgoCD Diff', [`**No differences for ${appLink(app, client)}.**`]);
     return
@@ -30067,11 +30161,17 @@ async function reportDiff(client, app, result) {
     statusLabel(r.status),
     r.paths.length > 0 ? String(r.paths.length) : '-'
   ]);
-  await writeSummary('ArgoCD Diff', [
+  const lines = [
     `**${changed.length} ${plural} differ for ${appLink(app, client)}.**`,
     '',
     table(['Resource', 'Change', 'Changed fields'], rows)
-  ]);
+  ];
+  // Optional field-level +/- rendering, in a ```diff fence so GitHub colours it.
+  if (unified) {
+    const body = renderUnifiedDiff(changed);
+    if (body) lines.push('', '```diff', body, '```');
+  }
+  await writeSummary('ArgoCD Diff', lines);
 }
 
 /** Evaluate whether the application currently satisfies the wait conditions. */
@@ -30445,6 +30545,7 @@ function readSettings() {
     timeout: parseNumber(getInput('timeout'), 600),
     syncBody: buildSyncBody(readSyncOptions()),
     restartKinds: parseRestartKinds(getInput('restart')),
+    unified: parseBool(getInput('unified-diff'), false),
     forSync: parseBool(getInput('wait-for-sync'), true),
     forHealth: parseBool(getInput('wait-for-health'), true),
     forOperation: parseBool(getInput('wait-for-operation'), true)
@@ -30509,7 +30610,7 @@ async function deployOne(client, app, settings) {
 
   // 2. Refresh + diff.
   const diff = await computeDiff(client, app, { refresh: settings.refresh, log });
-  logDiff(app, diff, log);
+  logDiff(app, diff, { log, unified: settings.unified });
   result.diff = diff.hasDiff;
 
   // 3. Rendered diff → sync. No diff → restart the chosen workloads (if any),
