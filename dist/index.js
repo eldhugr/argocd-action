@@ -30900,6 +30900,12 @@ async function deployOne(client, app, settings) {
   const diff = await computeDiff(client, app, { refresh: settings.refresh, log });
   logDiff(app, diff, { log, unified: settings.unified });
   result.diff = diff.hasDiff;
+  // When unified-diff is on, stash the rendered (Secret-masked) +/- block so the
+  // step summary can show it per app. Kept off the `results` output (stripped in
+  // run) to avoid bloating it.
+  if (settings.unified && diff.hasDiff) {
+    result.diffText = renderUnifiedDiff(diff.resources);
+  }
 
   // 3. Rendered diff → sync. No diff → restart the chosen workloads (if any),
   //    otherwise nothing: the app is already in its desired state.
@@ -30974,7 +30980,8 @@ async function run$5(client, app) {
   const succeeded = results.filter((r) => !r.error);
   const outcome = failures.length === 0 ? 'success' : succeeded.length === 0 ? 'failure' : 'partial';
 
-  setOutput('results', JSON.stringify(results));
+  // `diffText` is summary-only (it can be large); keep it out of the output.
+  setOutput('results', JSON.stringify(results.map(({ diffText, ...r }) => r)));
   setOutput('outcome', outcome);
   setOutput('failed', JSON.stringify(failures.map((f) => f.app)));
   // Convenience scalar outputs when deploying exactly one application.
@@ -31039,11 +31046,20 @@ async function reportStatus(client, results, outcome) {
           imagesCell(r.images)
         ]
   );
-  await writeSummary('ArgoCD Deploy', [
+  const lines = [
     headline,
     '',
     table(['Application', 'Result', 'Sync', 'Health', 'Details'], rows)
-  ]);
+  ];
+  // Per-application unified diff (when unified-diff is set), shown expanded under
+  // a per-app heading. Secret values are already masked in the rendered text.
+  // Apps without a rendered diff add nothing.
+  for (const r of results) {
+    if (r.diffText) {
+      lines.push('', `**Diff for ${code(r.app)}**`, '', '```diff', r.diffText, '```');
+    }
+  }
+  await writeSummary('ArgoCD Deploy', lines);
 }
 
 /**

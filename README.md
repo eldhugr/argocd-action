@@ -84,9 +84,10 @@ For `diff`, set `unified-diff: true` to add a field-level `+`/`-` diff in a
 values, so a reviewer sees exactly what changed (e.g. the image tag) rather than
 just a count. The same flag also expands the job log itself, from a `type: path`
 listing to `-`/`+` value lines under each resource. `deploy` honours the flag
-too, expanding the per-application diff it logs (its summary stays the status
-table). Values of `Secret` resources are masked (`***`) everywhere; only the
-changed key is named, never its value.
+too: it expands the per-application diff it logs, and adds the same `+`/`-` block
+to its step summary beneath the status table, one section per application that
+had a rendered diff. Values of `Secret` resources are masked (`***`) everywhere;
+only the changed key is named, never its value.
 
 ### `deploy` - the umbrella command
 
@@ -537,7 +538,7 @@ method, since they mean the request never reached the ArgoCD backend; timeouts
 and network errors are retried only for idempotent calls (the `GET` reads and the
 `PUT`/`DELETE` writes), never for a `POST` (e.g. `sync`), which could otherwise be
 applied twice. A `Retry-After` header is honoured. Retries are logged, and after
-the attempts are exhausted the underlying error is surfaced as normal. These
+the attempts are exhausted, the underlying error is surfaced as normal. These
 limits are internal (no inputs); the `timeout` input is unrelated - it bounds how
 long `wait`/`deploy` poll for `Synced`/`Healthy`.
 

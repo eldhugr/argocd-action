@@ -383,6 +383,39 @@ describe('deploy (single app)', () => {
     expect(log).toContain('- spec.image: app:old')
     expect(log).toContain('+ spec.image: app:new')
   })
+
+  it('adds a collapsible unified diff to the deploy summary, kept out of the results output', async () => {
+    managedResponse = diffItems()
+    setInputs(
+      baseInputs({ command: 'deploy', refresh: 'false', timeout: '30', 'unified-diff': 'true' })
+    )
+
+    await run()
+
+    const summary = core.summary.addRaw.mock.calls.map((c) => c[0]).join('\n')
+    expect(summary).toContain('**Diff for')
+    expect(summary).toContain('```diff')
+    expect(summary).toContain('- spec.image: app:old')
+    expect(summary).toContain('+ spec.image: app:new')
+
+    // The (potentially large) diff text must not leak into the `results` output.
+    const results = JSON.parse(
+      core.setOutput.mock.calls.find((c) => c[0] === 'results')[1]
+    )
+    expect(results[0].diff).toBe(true)
+    expect(results[0].diffText).toBeUndefined()
+  })
+
+  it('omits the unified diff from the deploy summary when unified-diff is off', async () => {
+    managedResponse = diffItems()
+    setInputs(baseInputs({ command: 'deploy', refresh: 'false', timeout: '30' }))
+
+    await run()
+
+    const summary = core.summary.addRaw.mock.calls.map((c) => c[0]).join('\n')
+    expect(summary).not.toContain('```diff')
+    expect(summary).not.toContain('**Diff for')
+  })
 })
 
 describe('deploy (multiple apps)', () => {
