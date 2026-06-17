@@ -14,7 +14,13 @@ function evaluate(app, { forSync, forHealth, forOperation }) {
     Boolean(app.operation) || opPhase === 'Running' || opPhase === 'Terminating'
 
   const reasons = []
-  if (forOperation && operationPending) reasons.push(`operation ${opPhase || 'pending'}`)
+  if (forOperation && operationPending) {
+    // `opPhase` reflects the *last finished* operation while `app.operation`
+    // holds a newly queued one, so only report a live phase; a queued op is
+    // "pending" rather than the stale (e.g. "Succeeded") phase.
+    const phase = opPhase === 'Running' || opPhase === 'Terminating' ? opPhase : 'pending'
+    reasons.push(`operation ${phase}`)
+  }
   if (forSync && syncStatus !== 'Synced') reasons.push(`sync=${syncStatus}`)
   if (forHealth && healthStatus !== 'Healthy') reasons.push(`health=${healthStatus}`)
 

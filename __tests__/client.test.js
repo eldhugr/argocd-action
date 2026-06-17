@@ -3,7 +3,10 @@ import * as core from '../__fixtures__/core.js'
 
 jest.unstable_mockModule('@actions/core', () => core)
 
-const { ArgoClient } = await import('../src/client.js')
+const { ArgoClient, retryAfterMs } = await import('../src/client.js')
+
+/** A response stub carrying a single `Retry-After` header value. */
+const withRetryAfter = (value) => ({ headers: { get: (k) => (k === 'retry-after' ? value : null) } })
 
 const realFetch = globalThis.fetch
 afterEach(() => {
@@ -87,5 +90,39 @@ describe('ArgoClient request resilience', () => {
         })
     )
     await expect(client({ timeoutMs: 20, maxRetries: 0 }).getApp('app')).rejects.toThrow(/timed out after 20ms/)
+  })
+})
+
+describe('retryAfterMs', () => {
+  it('returns 0 when the header is absent', () => {
+    expect(retryAfterMs({ headers: { get: () => null } })).toBe(0)
+  })
+
+  it('parses a delta-seconds value', () => {
+    expect(retryAfterMs(withRetryAfter('2'))).toBe(2000)
+  })
+
+  it('ignores a non-positive delta', () => {
+    expect(retryAfterMs(withRetryAfter('0'))).toBe(0)
+  })
+
+  it('parses an HTTP-date in the future', () => {
+    const when = new Date(Date.now() + 30000).toUTCString()
+    const ms = retryAfterMs(withRetryAfter(when))
+    expect(ms).toBeGreaterThan(0)
+    expect(ms).toBeLessThanOrEqual(30000)
+  })
+
+  it('treats a past HTTP-date as no delay', () => {
+    const when = new Date(Date.now() - 30000).toUTCString()
+    expect(retryAfterMs(withRetryAfter(when))).toBe(0)
+  })
+
+  it('ignores an unparseable value', () => {
+    expect(retryAfterMs(withRetryAfter('soon'))).toBe(0)
+  })
+
+  it('caps an absurdly large delay', () => {
+    expect(retryAfterMs(withRetryAfter('999999'))).toBe(10000)
   })
 })

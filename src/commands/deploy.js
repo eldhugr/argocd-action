@@ -81,9 +81,42 @@ export function resolveAppNames(app, applicationsRaw) {
     return names
   }
   if (!app) {
-    throw new Error('Provide `app` (single) or `applications` (multiple).')
+    throw new Error('Provide `application` (single) or `applications` (multiple).')
   }
   return [app]
+}
+
+/**
+ * Cap on how many applications deploy concurrently in parallel mode. A fixed
+ * pool of workers drains the queue, so any number of apps can be passed without
+ * opening an unbounded number of connections to the ArgoCD gateway at once.
+ */
+const MAX_PARALLEL = 8
+
+/**
+ * Run `worker` over `items` with at most `limit` in flight at once: a fixed pool
+ * of `limit` workers drains a shared queue (`limit >= items.length` just runs
+ * them all). Resolves to a Promise.allSettled-style array aligned to `items`, so
+ * a single failure never rejects the whole batch.
+ */
+export async function settledWithConcurrency(items, limit, worker) {
+  if (limit >= items.length) {
+    return Promise.allSettled(items.map((item, i) => worker(item, i)))
+  }
+  const results = new Array(items.length)
+  let next = 0
+  const runner = async () => {
+    while (next < items.length) {
+      const i = next++
+      try {
+        results[i] = { status: 'fulfilled', value: await worker(items[i], i) }
+      } catch (reason) {
+        results[i] = { status: 'rejected', reason }
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: limit }, runner))
+  return results
 }
 
 /** Run the set → diff → (restart|sync) → wait sequence for one application. */
@@ -155,7 +188,10 @@ export async function run(client, app) {
   // allow-failure forces fail-fast off, so every app is attempted and reported.
   const failFast = allowFailure ? false : parseBool(core.getInput('fail-fast'), true)
 
-  core.info(`Deploying ${apps.length} application(s): ${apps.join(', ')}`)
+  const capped = parallel && apps.length > MAX_PARALLEL
+  core.info(
+    `Deploying ${apps.length} application(s)${capped ? ` (max ${MAX_PARALLEL} at a time)` : ''}: ${apps.join(', ')}`
+  )
 
   const toError = (name, err) => ({
     app: name,
@@ -164,7 +200,9 @@ export async function run(client, app) {
 
   let results
   if (parallel && apps.length > 1) {
-    const settled = await Promise.allSettled(apps.map((name) => deployOne(client, name, settings)))
+    const settled = await settledWithConcurrency(apps, MAX_PARALLEL, (name) =>
+      deployOne(client, name, settings)
+    )
     results = settled.map((s, i) => (s.status === 'fulfilled' ? s.value : toError(apps[i], s.reason)))
   } else {
     results = []

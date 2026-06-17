@@ -31,7 +31,12 @@ async function createClient(config) {
   if (config.authMethod === 'oidc') {
     core.info('Authenticating to ArgoCD via GitHub OIDC token exchange...')
     const idToken = await core.getIDToken(config.oidcAudience || undefined)
-    return ArgoClient.loginOidc({ ...config, idToken })
+    return ArgoClient.loginOidc({
+      ...config,
+      idToken,
+      clientId: config.oidcClientId,
+      connectorId: config.oidcConnectorId
+    })
   }
   return ArgoClient.login(config)
 }

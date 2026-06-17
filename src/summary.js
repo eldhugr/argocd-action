@@ -25,14 +25,20 @@ export const fail = (text) => `✗ ${text}`
 
 /**
  * Application name as a monospace label, linked to its ArgoCD UI page when the
- * client knows the server. The namespace defaults to `argocd`.
+ * client knows the server. A namespace segment is added only when `appNamespace`
+ * is set (apps-in-any-namespace); otherwise the classic `/applications/<name>`
+ * URL is used, which the UI resolves for apps in the default namespace - rather
+ * than guessing a namespace that may produce a dead link.
  */
 export function appLink(app, client) {
   const label = code(app)
   const baseUrl = client?.baseUrl || ''
   if (!baseUrl) return label
-  const ns = encodeURIComponent(client?.appNamespace || 'argocd')
-  return `[${label}](${baseUrl}/applications/${ns}/${encodeURIComponent(app)})`
+  const ns = client?.appNamespace
+  const path = ns
+    ? `${encodeURIComponent(ns)}/${encodeURIComponent(app)}`
+    : encodeURIComponent(app)
+  return `[${label}](${baseUrl}/applications/${path})`
 }
 
 /**

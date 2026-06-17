@@ -120,12 +120,25 @@ list (`Deployment`, `StatefulSet`, `Deployment,StatefulSet`) to force a rollout
 restart of those workloads when there's no rendered diff - useful when the image
 tag is a moving ref (e.g., a branch) rather than an immutable SHA.
 
+> Please note that a rollout restart patches the live workload (a
+> `kubectl.kubernetes.io/restartedAt` annotation), which ArgoCD reports as
+> `OutOfSync` unless that field is covered by `ignoreDifferences`. With the
+> default `wait-for-sync: true`, the post-restart wait would then never reach
+> `Synced` and time out. When you rely on `restart`, either set `wait-for-sync:
+> 'false'` (wait on health only) or make sure the annotation is ignored on the
+> server, so the wait tracks the rollout rather than a self-inflicted drift.
+
 #### Multiple applications
 
 Pass `applications` - a JSON array or newline/comma-separated list - instead of
 `application`. Every target is deployed with the **same** settings
 (`parameters`, `timeout`, `refresh`, `restart`, `wait-for-*`, …); there are no
 per-application overrides.
+
+With `parallel` (the default), applications deploy concurrently through a queue
+that runs at most 8 at a time, so a long list won't open an unbounded number of
+connections to the ArgoCD gateway; the rest wait their turn. Set `parallel:
+'false'` to deploy strictly one at a time.
 
 ```yaml
 - name: Deploy all clusters
@@ -489,7 +502,7 @@ source type; they target the same selected source for multi-source apps.
 |-----------------|----------------------------------|---------|---------------------------------------------------------------------------------|
 | `applications`  | JSON array \| newline/comma list |         | App names; overrides `application`                                              |
 | `restart`       | `false` \| kind / comma-list     | `false` | On no diff, restart these workloads                                             |
-| `parallel`      | `true` \| `false`                | `true`  | Deploy multiple apps concurrently (`false` = one-at-a-time)                     |
+| `parallel`      | `true` \| `false`                | `true`  | Deploy multiple apps concurrently, max 8 at a time (`false` = one-at-a-time)    |
 | `fail-fast`     | `true` \| `false`                | `true`  | Stop after the first failure (sequential); ignored with `allow-failure`         |
 | `allow-failure` | `true` \| `false`                | `false` | Don't fail the job on app failures; deploy the rest. Implies `fail-fast: false` |
 

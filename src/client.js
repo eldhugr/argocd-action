@@ -41,11 +41,23 @@ function backoffDelay(attempt, base) {
   return exp + Math.floor(Math.random() * 250)
 }
 
-/** Honour a `Retry-After` (seconds) header, capped so it can't stall the job. */
-function retryAfterMs(res) {
+/**
+ * Honour a `Retry-After` header, capped so it can't stall the job. Accepts both
+ * forms HTTP allows: a delta in seconds (`120`) or an HTTP-date
+ * (`Wed, 21 Oct 2015 07:28:00 GMT`).
+ */
+export function retryAfterMs(res) {
   const header = res.headers?.get?.('retry-after')
-  const secs = header ? Number(header) : NaN
-  return Number.isFinite(secs) && secs > 0 ? Math.min(2 * RETRY_CAP_MS, secs * 1000) : 0
+  if (!header) return 0
+  const cap = 2 * RETRY_CAP_MS
+  const secs = Number(header)
+  if (Number.isFinite(secs)) {
+    return secs > 0 ? Math.min(cap, secs * 1000) : 0
+  }
+  const when = Date.parse(header)
+  if (Number.isNaN(when)) return 0
+  const delta = when - Date.now()
+  return delta > 0 ? Math.min(cap, delta) : 0
 }
 
 /** fetch() with an AbortController deadline; rejects with AbortError on timeout. */

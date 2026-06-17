@@ -130,7 +130,8 @@ export function toParams(parameters) {
 
 /**
  * Apply Helm parameters to an application's source and persist the spec.
- * Reusable op shared by the `set` and `deploy` commands.
+ * Reusable op shared by the `set` and `deploy` commands. Returns the parsed
+ * inputs ({ params, unset, images }) so callers don't have to re-parse them.
  */
 export async function setParameters(client, app, { parameters, unsetParameters, kustomizeImages, sourceName, sourcePosition, log = core.info } = {}) {
   const params = toParams(parameters)
@@ -166,6 +167,7 @@ export async function setParameters(client, app, { parameters, unsetParameters, 
 
   await client.updateSpec(app, spec)
   log(`Updated spec for ${app}`)
+  return { params, unset, images }
 }
 
 /** Headline like "Set 2 parameters, unset 1 parameter and set 1 image on <app>." */
@@ -183,20 +185,14 @@ function changeHeadline({ set = 0, unset = 0, images = 0 }, link) {
 }
 
 export async function run(client, app) {
-  const parameters = core.getInput('parameters')
-  const unsetParameters = core.getInput('unset-parameters')
-  const kustomizeImages = core.getInput('kustomize-images')
-  await setParameters(client, app, {
-    parameters,
-    unsetParameters,
-    kustomizeImages,
+  const { params, unset, images } = await setParameters(client, app, {
+    parameters: core.getInput('parameters'),
+    unsetParameters: core.getInput('unset-parameters'),
+    kustomizeImages: core.getInput('kustomize-images'),
     sourceName: core.getInput('source-name'),
     sourcePosition: core.getInput('source-position')
   })
 
-  const params = toParams(parameters)
-  const unset = parseList(unsetParameters)
-  const images = parseList(kustomizeImages)
   const paramRows = [
     ...params.map((p) => [code(p.name), code(isSecretName(p.name) ? MASK : p.value)]),
     ...unset.map((name) => [code(name), 'removed'])

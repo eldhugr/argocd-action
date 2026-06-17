@@ -44,9 +44,8 @@ inputs:
     required: false
     default: 'github-actions'
   insecure:
-    description: 'Skip TLS certificate verification (defaults to $ARGOCD_INSECURE)'
+    description: 'Skip TLS certificate verification (defaults to $ARGOCD_INSECURE, else false)'
     required: false
-    default: 'false'
   app-namespace:
     description: 'Namespace of the Application CR (appNamespace query param), for apps in any namespace'
     required: false

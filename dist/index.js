@@ -29494,11 +29494,23 @@ function backoffDelay(attempt, base) {
   return exp + Math.floor(Math.random() * 250)
 }
 
-/** Honour a `Retry-After` (seconds) header, capped so it can't stall the job. */
+/**
+ * Honour a `Retry-After` header, capped so it can't stall the job. Accepts both
+ * forms HTTP allows: a delta in seconds (`120`) or an HTTP-date
+ * (`Wed, 21 Oct 2015 07:28:00 GMT`).
+ */
 function retryAfterMs(res) {
   const header = res.headers?.get?.('retry-after');
-  const secs = header ? Number(header) : NaN;
-  return Number.isFinite(secs) && secs > 0 ? Math.min(2 * RETRY_CAP_MS, secs * 1000) : 0
+  if (!header) return 0
+  const cap = 2 * RETRY_CAP_MS;
+  const secs = Number(header);
+  if (Number.isFinite(secs)) {
+    return secs > 0 ? Math.min(cap, secs * 1000) : 0
+  }
+  const when = Date.parse(header);
+  if (Number.isNaN(when)) return 0
+  const delta = when - Date.now();
+  return delta > 0 ? Math.min(cap, delta) : 0
 }
 
 /** fetch() with an AbortController deadline; rejects with AbortError on timeout. */
@@ -29774,14 +29786,20 @@ const fail = (text) => `✗ ${text}`;
 
 /**
  * Application name as a monospace label, linked to its ArgoCD UI page when the
- * client knows the server. The namespace defaults to `argocd`.
+ * client knows the server. A namespace segment is added only when `appNamespace`
+ * is set (apps-in-any-namespace); otherwise the classic `/applications/<name>`
+ * URL is used, which the UI resolves for apps in the default namespace - rather
+ * than guessing a namespace that may produce a dead link.
  */
 function appLink(app, client) {
   const label = code(app);
   const baseUrl = client?.baseUrl || '';
   if (!baseUrl) return label
-  const ns = encodeURIComponent(client?.appNamespace || 'argocd');
-  return `[${label}](${baseUrl}/applications/${ns}/${encodeURIComponent(app)})`
+  const ns = client?.appNamespace;
+  const path = ns
+    ? `${encodeURIComponent(ns)}/${encodeURIComponent(app)}`
+    : encodeURIComponent(app);
+  return `[${label}](${baseUrl}/applications/${path})`
 }
 
 /**
@@ -30003,7 +30021,8 @@ function toParams(parameters) {
 
 /**
  * Apply Helm parameters to an application's source and persist the spec.
- * Reusable op shared by the `set` and `deploy` commands.
+ * Reusable op shared by the `set` and `deploy` commands. Returns the parsed
+ * inputs ({ params, unset, images }) so callers don't have to re-parse them.
  */
 async function setParameters(client, app, { parameters, unsetParameters, kustomizeImages, sourceName, sourcePosition, log = info } = {}) {
   const params = toParams(parameters);
@@ -30039,6 +30058,7 @@ async function setParameters(client, app, { parameters, unsetParameters, kustomi
 
   await client.updateSpec(app, spec);
   log(`Updated spec for ${app}`);
+  return { params, unset, images }
 }
 
 /** Headline like "Set 2 parameters, unset 1 parameter and set 1 image on <app>." */
@@ -30056,20 +30076,14 @@ function changeHeadline({ set = 0, unset = 0, images = 0 }, link) {
 }
 
 async function run$9(client, app) {
-  const parameters = getInput('parameters');
-  const unsetParameters = getInput('unset-parameters');
-  const kustomizeImages = getInput('kustomize-images');
-  await setParameters(client, app, {
-    parameters,
-    unsetParameters,
-    kustomizeImages,
+  const { params, unset, images } = await setParameters(client, app, {
+    parameters: getInput('parameters'),
+    unsetParameters: getInput('unset-parameters'),
+    kustomizeImages: getInput('kustomize-images'),
     sourceName: getInput('source-name'),
     sourcePosition: getInput('source-position')
   });
 
-  const params = toParams(parameters);
-  const unset = parseList(unsetParameters);
-  const images = parseList(kustomizeImages);
   const paramRows = [
     ...params.map((p) => [code(p.name), code(isSecretName(p.name) ? MASK : p.value)]),
     ...unset.map((name) => [code(name), 'removed'])
@@ -30395,7 +30409,13 @@ function evaluate(app, { forSync, forHealth, forOperation }) {
     Boolean(app.operation) || opPhase === 'Running' || opPhase === 'Terminating';
 
   const reasons = [];
-  if (forOperation && operationPending) reasons.push(`operation ${opPhase || 'pending'}`);
+  if (forOperation && operationPending) {
+    // `opPhase` reflects the *last finished* operation while `app.operation`
+    // holds a newly queued one, so only report a live phase; a queued op is
+    // "pending" rather than the stale (e.g. "Succeeded") phase.
+    const phase = opPhase === 'Running' || opPhase === 'Terminating' ? opPhase : 'pending';
+    reasons.push(`operation ${phase}`);
+  }
   if (forSync && syncStatus !== 'Synced') reasons.push(`sync=${syncStatus}`);
   if (forHealth && healthStatus !== 'Healthy') reasons.push(`health=${healthStatus}`);
 
@@ -30814,9 +30834,42 @@ function resolveAppNames(app, applicationsRaw) {
     return names
   }
   if (!app) {
-    throw new Error('Provide `app` (single) or `applications` (multiple).')
+    throw new Error('Provide `application` (single) or `applications` (multiple).')
   }
   return [app]
+}
+
+/**
+ * Cap on how many applications deploy concurrently in parallel mode. A fixed
+ * pool of workers drains the queue, so any number of apps can be passed without
+ * opening an unbounded number of connections to the ArgoCD gateway at once.
+ */
+const MAX_PARALLEL = 8;
+
+/**
+ * Run `worker` over `items` with at most `limit` in flight at once: a fixed pool
+ * of `limit` workers drains a shared queue (`limit >= items.length` just runs
+ * them all). Resolves to a Promise.allSettled-style array aligned to `items`, so
+ * a single failure never rejects the whole batch.
+ */
+async function settledWithConcurrency(items, limit, worker) {
+  if (limit >= items.length) {
+    return Promise.allSettled(items.map((item, i) => worker(item, i)))
+  }
+  const results = new Array(items.length);
+  let next = 0;
+  const runner = async () => {
+    while (next < items.length) {
+      const i = next++;
+      try {
+        results[i] = { status: 'fulfilled', value: await worker(items[i], i) };
+      } catch (reason) {
+        results[i] = { status: 'rejected', reason };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: limit }, runner));
+  return results
 }
 
 /** Run the set → diff → (restart|sync) → wait sequence for one application. */
@@ -30888,7 +30941,10 @@ async function run$5(client, app) {
   // allow-failure forces fail-fast off, so every app is attempted and reported.
   const failFast = allowFailure ? false : parseBool(getInput('fail-fast'), true);
 
-  info(`Deploying ${apps.length} application(s): ${apps.join(', ')}`);
+  const capped = parallel && apps.length > MAX_PARALLEL;
+  info(
+    `Deploying ${apps.length} application(s)${capped ? ` (max ${MAX_PARALLEL} at a time)` : ''}: ${apps.join(', ')}`
+  );
 
   const toError = (name, err) => ({
     app: name,
@@ -30897,7 +30953,9 @@ async function run$5(client, app) {
 
   let results;
   if (parallel && apps.length > 1) {
-    const settled = await Promise.allSettled(apps.map((name) => deployOne(client, name, settings)));
+    const settled = await settledWithConcurrency(apps, MAX_PARALLEL, (name) =>
+      deployOne(client, name, settings)
+    );
     results = settled.map((s, i) => (s.status === 'fulfilled' ? s.value : toError(apps[i], s.reason)));
   } else {
     results = [];
@@ -31184,7 +31242,12 @@ async function createClient(config) {
   if (config.authMethod === 'oidc') {
     info('Authenticating to ArgoCD via GitHub OIDC token exchange...');
     const idToken = await getIDToken(config.oidcAudience || undefined);
-    return ArgoClient.loginOidc({ ...config, idToken })
+    return ArgoClient.loginOidc({
+      ...config,
+      idToken,
+      clientId: config.oidcClientId,
+      connectorId: config.oidcConnectorId
+    })
   }
   return ArgoClient.login(config)
 }

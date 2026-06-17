@@ -680,6 +680,26 @@ describe('auth (oidc)', () => {
     expect(core.setFailed).not.toHaveBeenCalled()
     expect(interactions.dexExchanges).toHaveLength(1)
   })
+
+  it('uses a custom oidc-client-id and oidc-connector-id in the exchange', async () => {
+    setInputs({
+      command: 'get',
+      application: APP,
+      server: baseUrl,
+      'auth-method': 'oidc',
+      'oidc-client-id': 'my-client',
+      'oidc-connector-id': 'my-connector',
+      refresh: 'false'
+    })
+
+    await run()
+
+    expect(core.setFailed).not.toHaveBeenCalled()
+    expect(interactions.dexExchanges).toHaveLength(1)
+    const exchange = interactions.dexExchanges[0]
+    expect(exchange.body).toContain('connector_id=my-connector')
+    expect(exchange.auth).toBe(`Basic ${Buffer.from('my-client:').toString('base64')}`)
+  })
 })
 
 describe('dispatch', () => {
