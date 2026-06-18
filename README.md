@@ -57,17 +57,17 @@ Published as `eldhugr/argocd-action`; pin to a release tag (`@v1`).
 Every run executes one `command`. `deploy` is the umbrella that most pipelines
 use; the others are the individual steps it composes, exposed for standalone use.
 
-| command        | what it does                                                                          |
-|----------------|---------------------------------------------------------------------------------------|
-| `deploy`       | Umbrella: `set` → `diff` → (sync if diff / restart if not) → `wait`. One app or many. |
-| `set`          | Set/unset Helm parameters or Kustomize images on an application's source.             |
-| `diff`         | Report whether the live state differs from target (sets a `diff` output).             |
-| `sync`         | Sync the app with full sync options (prune, force, server-side, …), then wait.        |
-| `wait`         | Poll until the app is `Synced` + `Healthy` with no in-flight operation.               |
-| `rollback`     | Roll back to a previous deployment (by id, revision, or the previous one).            |
-| `get`          | Read-only status fetch → sets status / revision / images / history outputs.           |
-| `history`      | List the app's deployment history (sets the `history` output).                        |
-| `terminate-op` | Terminate the app's currently running sync operation.                                 |
+| command        | what it does                                                                             |
+|----------------|------------------------------------------------------------------------------------------|
+| `deploy`       | Umbrella: `set` -> `diff` -> (sync if diff / restart if not) -> `wait`. One app or many. |
+| `set`          | Set/unset Helm parameters or Kustomize images on an application's source.                |
+| `diff`         | Report whether the live state differs from target (sets a `diff` output).                |
+| `sync`         | Sync the app with full sync options (prune, force, server-side, …), then wait.           |
+| `wait`         | Poll until the app is `Synced` + `Healthy` with no in-flight operation.                  |
+| `rollback`     | Roll back to a previous deployment (by id, revision, or the previous one).               |
+| `get`          | Read-only status fetch -> sets status / revision / images / history outputs.             |
+| `history`      | List the app's deployment history (sets the `history` output).                           |
+| `terminate-op` | Terminate the app's currently running sync operation.                                    |
 
 #### Step summaries
 
@@ -99,8 +99,8 @@ argocd app diff "$app" --refresh && argocd app actions run "$app" restart --kind
 argocd app wait "$app" --timeout 600
 ```
 
-It runs `set` → `diff` → (**rendered diff ⇒ sync** / **no diff ⇒ restart the
-workloads named by `restart`, or nothing**) → `wait`, end to end:
+It runs `set` -> `diff` -> (**rendered diff => sync** / **no diff => restart the
+workloads named by `restart`, or nothing**) -> `wait`, end to end:
 
 ```yaml
 - name: Deploy
@@ -170,7 +170,7 @@ connections to the ArgoCD gateway; the rest wait their turn. Set `parallel:
   column) is written to the **GitHub step summary**, and logged with ✓/✗ markers.
   The result says what happened - `Deployed`, `Restarted`, `No change`, or `Failed`.
   The application name links to its ArgoCD page. On success the details column
-  shows the container image transition (`old → new`, shortened to `basename:tag`)
+  shows the container image transition (`old -> new`, shortened to `basename:tag`)
   when an image changed, otherwise the running image(s) (first + `(+N)`); on
   failure it holds the reason, taken from the app's operation message, conditions,
   and any non-Healthy resources.
@@ -187,7 +187,7 @@ connections to the ArgoCD gateway; the rest wait their turn. Set `parallel:
 ```
 
 > Please note that the restart/sync branch mirrors the shell `&&`/`||` exactly **except** the rare
-> "restart failed ⇒ fall back to sync" case: here a restart error fails the app
+> "restart failed => fall back to sync" case: here a restart error fails the app
 > instead of falling through to a sync.
 
 ### `sync` - sync with options
@@ -288,12 +288,12 @@ method is set by `auth-method`, or inferred when it is unset:
 |------------|---------------------------------------------------------------|---------------------------------------|
 | `token`    | `auth-token` / `$ARGOCD_AUTH_TOKEN`                           | Long-lived bearer token.              |
 | `password` | `username`+`password` / `$ARGOCD_USERNAME`+`$ARGOCD_PASSWORD` | Logs in via `POST /api/v1/session`.   |
-| `oidc`     | none - minted per run                                         | GitHub OIDC federation (recommended). |
+| `oidc`     | none - minted per run                                         | GitHub OIDC federation.               |
 
-When `auth-method` is unset it is inferred: token → password → OIDC (if the job
+When `auth-method` is unset it is inferred: token -> password -> OIDC (if the job
 can mint an ID token).
 
-### OIDC token federation (recommended)
+### OIDC token federation
 
 Instead of storing a long-lived ArgoCD token as a secret, the action mints a
 short-lived GitHub Actions ID token per run and exchanges it for an ArgoCD token
@@ -317,30 +317,72 @@ jobs:
           ARGOCD_SERVER: ${{ vars.ARGOCD_SERVER }}
 ```
 
+That is the whole client side - no `ARGOCD_AUTH_TOKEN` secret. What happens per run:
+
+1. The job asks GitHub for a short-lived OIDC ID token (granted by
+   `permissions: id-token: write`). Its `sub` claim identifies the workflow, e.g.
+   `repo:my-org/my-repo:ref:refs/heads/main`.
+2. The action exchanges that token at `POST /api/dex/token` using an OAuth 2.0
+   token exchange (`grant_type=urn:ietf:params:oauth:grant-type:token-exchange`),
+   as client `argo-cd-cli` through the `github-actions` connector.
+3. Dex verifies the token against GitHub's issuer keys, maps the `sub` claim to an
+   ArgoCD user (and any groups), and returns a short-lived ArgoCD `access_token`.
+4. The action uses that `access_token` as the Bearer for the rest of the run.
+   Nothing long-lived is stored anywhere.
+
+For this to succeed, an ArgoCD operator wires up two things once: a Dex connector
+that trusts GitHub as an issuer, and RBAC that grants the workflow's identity the
+verbs it needs.
+
 **Server-side prerequisites** (one-time, by an ArgoCD operator):
 
 <details>
 <summary>1. Dex connector in the <code>argocd-cm</code> ConfigMap</summary>
 
+Add this to the `dex.config` key of the `argocd-cm` ConfigMap (its value is a
+YAML string). The ConfigMap's `url` field must also be set to ArgoCD's external
+URL, since Dex derives its issuer from it.
+
 ```yaml
 connectors:
   - type: oidc
-    id: github-actions # matches `oidc-connector-id` (default)
+    id: github-actions                 # must match the action's `oidc-connector-id` input (which defaults to `github-actions`)
     name: GitHub Actions
     config:
       issuer: https://token.actions.githubusercontent.com/
+      scopes:
+        - openid
+      userNameKey: sub                  # the RBAC subject is the token's `sub` claim
+      insecureSkipEmailVerified: true   # GitHub ID tokens carry no verified email
 ```
+
+`userNameKey: sub` tells Dex to identify the caller by GitHub's `sub` claim,
+which is exactly what the RBAC policies in step 2 match on. No
+`clientID`/`clientSecret` is configured: the token-exchange path validates the
+incoming GitHub ID token against the issuer's public keys directly, and does not
+check its audience.
 
 </details>
 
 <details>
-<summary>2. RBAC policies in <code>argocd-rbac-cm</code> (ArgoCD ≥ v3.0)</summary>
+<summary>2. RBAC policies in <code>argocd-rbac-cm</code> (ArgoCD v3.0+)</summary>
 
-For a repo deploying from `main`, the subject is
-`repo:my-org/my-repo:ref:refs/heads/main`:
+With `userNameKey: sub`, the policy subject is GitHub's `sub` claim, whose exact
+shape depends on what triggered the workflow:
+
+| workflow trigger         | `sub` claim (the RBAC subject)               |
+|--------------------------|----------------------------------------------|
+| push to a branch         | `repo:my-org/my-repo:ref:refs/heads/main`    |
+| push of a tag            | `repo:my-org/my-repo:ref:refs/tags/v1.2.3`   |
+| pull request             | `repo:my-org/my-repo:pull_request`           |
+| job using an environment | `repo:my-org/my-repo:environment:production` |
+
+ArgoCD matches the subject **exactly** (no glob), so every trigger that deploys
+needs its own line. For a repo deploying from `main`, add these to the
+`policy.csv` key of `argocd-rbac-cm`:
 
 ```
-# policy.csv  (scope */* to <project>/* to restrict apps)
+# Narrow the object from */* to <project>/* to restrict which apps are reachable.
 p, repo:my-org/my-repo:ref:refs/heads/main, applications, get,      */*, allow
 p, repo:my-org/my-repo:ref:refs/heads/main, applications, sync,     */*, allow
 p, repo:my-org/my-repo:ref:refs/heads/main, applications, update,   */*, allow
@@ -348,30 +390,34 @@ p, repo:my-org/my-repo:ref:refs/heads/main, applications, override, */*, allow
 p, repo:my-org/my-repo:ref:refs/heads/main, applications, action/*, */*, allow
 ```
 
-Per command: `get` (all read paths) · `sync` (`sync`/`deploy`/`rollback`/`terminate-op`)
-· `update` (the `PUT /spec` write in `set`/`deploy`) · `override` (parameter
-overrides / `rollback`) · `action/*` (the `restart` resource action). Drop the
-lines for commands you don't use. The subject ties to the trigger - use
-`...:ref:refs/heads/<branch>` for other branches, or `repo:my-org/my-repo:pull_request`
-for PR-triggered runs. See the
-[RBAC reference](https://argo-cd.readthedocs.io/en/latest/operator-manual/rbac/)
-for the exact action each operation needs in your ArgoCD version.
+Each verb backs specific commands - keep only the lines you use:
 
-ArgoCD matches the subject **exactly** (no glob), so each trigger needs its own
-line. To grant a whole org without listing every subject, see (3) below.
+| RBAC verb                | needed by                                                          |
+|--------------------------|--------------------------------------------------------------------|
+| `applications, get`      | `get`, `history`, `diff`, `wait`, and the reads every command does |
+| `applications, sync`     | `sync`, `deploy` (its sync step), `rollback`, `terminate-op`       |
+| `applications, update`   | `set`, `deploy` (the `PUT /spec` parameter write)                  |
+| `applications, override` | parameter overrides, `rollback`                                    |
+| `applications, action/*` | the `restart` resource action used by `deploy`                     |
+
+For another branch use `...:ref:refs/heads/<branch>`; for PR-triggered runs use
+`repo:my-org/my-repo:pull_request`. See the
+[RBAC reference](https://argo-cd.readthedocs.io/en/latest/operator-manual/rbac/)
+for the exact action each operation needs in your ArgoCD version. To grant a
+whole org without listing every subject, see (3) below.
 
 </details>
 
 <details>
 <summary>3. Org-wide access without per-repo policies (optional)</summary>
 
-A wildcard subject like `repo:my-org/*:*` never matches, because ArgoCD compares
-the subject by exact string. To let **every repo in an org** (on any branch, tag,
-or PR) use the action without enumerating subjects, map a stable claim to an
+A wildcard subject like `repo:my-org/*` never matches, because ArgoCD compares
+the subject as an exact string. To let **every repo in an org** (on any branch,
+tag, or PR) use the action without enumerating subjects, map a stable claim to an
 ArgoCD **group** and write the policy against the group instead.
 
-GitHub's ID token carries a `repository_owner` claim (the org name). Surface it as
-a group on the Dex connector from step 1:
+GitHub's ID token carries a `repository_owner` claim (the org/user name). Surface
+it as a group by adding `claimMapping` to the connector from step 1:
 
 ```yaml
 connectors:
@@ -380,21 +426,23 @@ connectors:
     name: GitHub Actions
     config:
       issuer: https://token.actions.githubusercontent.com/
+      scopes:
+        - openid
+      userNameKey: sub
+      insecureSkipEmailVerified: true
       claimMapping:
-        groups: repository_owner # every repo under the org shares this group
+        groups: repository_owner   # every repo under the org shares this group
 ```
 
-Keep `groups` in the RBAC scopes (`argocd-rbac-cm`):
+`repository_owner` is a single string rather than a list. Dex wraps a scalar
+`groups` claim into a one-element group automatically, so the group ends up named
+after the org (`my-org`).
 
-```yaml
-scopes: '[groups, sub]'
+Then grant the group in `policy.csv`. ArgoCD checks policies against the subject
+**and** every group, so the verbs are identical to (2) - only the subject changes
+from the `repo:...` string to the org name:
+
 ```
-
-Then grant the group - ArgoCD matches policies against the subject **and** each
-group, so the verbs are identical to (2), only the subject changes:
-
-```
-# policy.csv
 p, my-org, applications, get,      */*, allow
 p, my-org, applications, sync,     */*, allow
 p, my-org, applications, update,   */*, allow
@@ -405,17 +453,21 @@ p, my-org, applications, action/*, */*, allow
 - **Blast radius** - this trusts every workflow in every org repo, on any ref, to
   act on every app (`*/*`). Scope the object to a project (`<project>/*`) and drop
   unused verbs to contain it.
-- **Fork PRs are excluded automatically** - GitHub does not grant `id-token: write`
-  to `pull_request` runs from forks, so external contributors can't mint a usable
-  token regardless of policy.
-- **Verify the mapping for your Dex version** - `claimMapping.groups` expects the
-  claim shape your Dex accepts (`repository_owner` is a scalar string); confirm the
-  group appears in the exchanged token before relying on it.
+- **Fork PRs are excluded automatically** - GitHub does not grant `id-token:
+  write` to `pull_request` runs from forks, so external contributors can't mint a
+  usable token regardless of policy.
+- **Confirm the group before relying on it** - groups-claim handling varies a
+  little across Dex versions. After a first run, check the ArgoCD server logs (or
+  start with a `get`-only policy) to confirm `my-org` appears as a group on the
+  exchanged token.
 
 </details>
 
-Override `oidc-client-id` (default `argo-cd-cli`), `oidc-connector-id` (default
-`github-actions`), or `oidc-audience` if your server uses different values.
+Override `oidc-client-id` (default `argo-cd-cli`) or `oidc-connector-id` (default
+`github-actions`) if your server uses different values. `oidc-audience` sets the
+audience of the minted GitHub token; it is rarely needed, because Dex does not
+verify the audience during the token exchange - set it only if something in front
+of your ArgoCD server (a proxy or gateway) requires a specific `aud`.
 
 ## Inputs
 
@@ -547,7 +599,7 @@ long `wait`/`deploy` poll for `Synced`/`Healthy`.
 
 This repo follows the
 [`actions/javascript-action`](https://github.com/actions/javascript-action)
-template conventions: ESM source under `src/` (`index.js` → `main.js`'s
+template conventions: ESM source under `src/` (`index.js` -> `main.js`'s
 `run()`), Rollup bundling, and Jest tests with `@actions/core` mocked via
 `__fixtures__/`. The target runtime comes from `engines.node` in `package.json`.
 
