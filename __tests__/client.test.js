@@ -74,6 +74,17 @@ describe('ArgoClient request resilience', () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(1)
   })
 
+  it('attaches the HTTP status to the thrown error so callers can classify it', async () => {
+    globalThis.fetch = jest.fn(async () => resp(403, { message: 'permission denied' }))
+    // 403 is what ArgoCD returns for a missing app (and a real RBAC denial); the
+    // caller distinguishes by `status` rather than parsing the message.
+    await expect(client().getApp('missing')).rejects.toMatchObject({
+      name: 'ArgoApiError',
+      status: 403
+    })
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+  })
+
   it('gives up after maxRetries and surfaces the last transient status', async () => {
     globalThis.fetch = jest.fn(async () => resp(503, { message: 'unavailable' }))
     await expect(client({ maxRetries: 2 }).getApp('app')).rejects.toThrow(/failed \(503\)/)

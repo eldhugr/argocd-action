@@ -82,14 +82,22 @@ export const MASK = '***'
 
 /**
  * Heuristic: does this parameter name look like it holds a secret? Matches common
- * substrings (password, token, secret, credential, auth, ...) and any name ending
- * in "key" (`tls.key`, `apiKey`, ...). Separators and case are ignored, so
- * `api-key`, `api_key` and `apiKey` all match. Errs toward masking; used to
- * redact values in step summaries and logs.
+ * substrings (password, token, secret, credential, ...) and any name ending in
+ * "key" (`tls.key`, `apiKey`, ...). Separators and case are ignored, so `api-key`,
+ * `api_key` and `apiKey` all match. Errs toward masking; used to redact values in
+ * step summaries and logs.
+ *
+ * The ambiguous token "auth" is judged on the leaf segment only: a Helm parameter
+ * path like `auth-web.release.commitSHA` carries the app/chart name (`auth-web`,
+ * `oauth-proxy`, ...) in its ancestor segments, and matching "auth" there would
+ * mask the commit SHA / ref everywhere in the job. As a leaf it still catches
+ * `basicAuth`, `oauth`, etc.
  */
 export function isSecretName(name) {
   const n = String(name || '').toLowerCase().replace(/[-_.]/g, '')
-  return /pass|pwd|secret|token|credential|auth|signature|apikey|accesskey|privatekey/.test(n) || /key$/.test(n)
+  if (/pass|pwd|secret|token|credential|signature|apikey|accesskey|privatekey/.test(n) || /key$/.test(n)) return true
+  const leaf = String(name || '').toLowerCase().split('.').pop().replace(/[-_]/g, '')
+  return /auth/.test(leaf)
 }
 
 /** The first revision, shortened to a 7-char sha when it looks like one. */

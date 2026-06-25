@@ -29483,6 +29483,24 @@ function isIdempotent(method) {
   return method === 'GET' || method === 'PUT' || method === 'DELETE' || method === 'HEAD'
 }
 
+/**
+ * Error thrown for a non-ok ArgoCD API response. Carries the HTTP `status` so
+ * callers can classify a failure without parsing the message string - notably
+ * the deploy command, which maps 404 -> the application does not exist and
+ * 403 -> ArgoCD's "permission denied". Note that since ArgoCD v2.7 a GET for a
+ * non-existent application returns 403 (intentional masking to avoid leaking
+ * which apps exist), so a 403 means "missing or no access", not a clean 404.
+ */
+class ArgoApiError extends Error {
+  constructor(message, { status, method, path } = {}) {
+    super(message);
+    this.name = 'ArgoApiError';
+    this.status = status;
+    this.method = method;
+    this.path = path;
+  }
+}
+
 function isRetryableStatus(status, idempotent) {
   if (ALWAYS_RETRY_STATUS.has(status)) return true
   return idempotent && status === 500
@@ -29707,7 +29725,10 @@ class ArgoClient {
       } catch {
         // keep raw text
       }
-      throw new Error(`ArgoCD API ${method} ${path} failed (${res.status}): ${message}`)
+      throw new ArgoApiError(
+        `ArgoCD API ${method} ${path} failed (${res.status}): ${message}`,
+        { status: res.status, method, path }
+      )
     }
     return text ? JSON.parse(text) : {}
   }
@@ -29843,14 +29864,22 @@ const MASK = '***';
 
 /**
  * Heuristic: does this parameter name look like it holds a secret? Matches common
- * substrings (password, token, secret, credential, auth, ...) and any name ending
- * in "key" (`tls.key`, `apiKey`, ...). Separators and case are ignored, so
- * `api-key`, `api_key` and `apiKey` all match. Errs toward masking; used to
- * redact values in step summaries and logs.
+ * substrings (password, token, secret, credential, ...) and any name ending in
+ * "key" (`tls.key`, `apiKey`, ...). Separators and case are ignored, so `api-key`,
+ * `api_key` and `apiKey` all match. Errs toward masking; used to redact values in
+ * step summaries and logs.
+ *
+ * The ambiguous token "auth" is judged on the leaf segment only: a Helm parameter
+ * path like `auth-web.release.commitSHA` carries the app/chart name (`auth-web`,
+ * `oauth-proxy`, ...) in its ancestor segments, and matching "auth" there would
+ * mask the commit SHA / ref everywhere in the job. As a leaf it still catches
+ * `basicAuth`, `oauth`, etc.
  */
 function isSecretName(name) {
   const n = String(name || '').toLowerCase().replace(/[-_.]/g, '');
-  return /pass|pwd|secret|token|credential|auth|signature|apikey|accesskey|privatekey/.test(n) || /key$/.test(n)
+  if (/pass|pwd|secret|token|credential|signature|apikey|accesskey|privatekey/.test(n) || /key$/.test(n)) return true
+  const leaf = String(name || '').toLowerCase().split('.').pop().replace(/[-_]/g, '');
+  return /auth/.test(leaf)
 }
 
 /** The first revision, shortened to a 7-char sha when it looks like one. */
@@ -30902,6 +30931,7 @@ async function deployOne(client, app, settings) {
   const log = (msg) => info(`[${app}] ${msg}`);
   const result = {
     app,
+    status: 'unchanged',
     diff: false,
     action: 'none',
     syncStatus: '',
@@ -30966,7 +30996,49 @@ async function deployOne(client, app, settings) {
   result.healthStatus = status.healthStatus;
   result.revision = status.revision;
   result.images = status.images;
+  result.status = statusForAction(result.action);
   return result
+}
+
+/** Map a successful deploy's action token to its canonical result status. */
+function statusForAction(action) {
+  if (action === 'sync') return 'updated'
+  if (/^restart\(\d+\)$/.test(action)) return 'restarted'
+  return 'unchanged'
+}
+
+/**
+ * Classify a per-application failure into a result status from the HTTP status
+ * of the underlying ArgoCD error: 404 -> `missing` (the app does not exist),
+ * 403 -> `forbidden` (ArgoCD returns this both for a non-existent app and a
+ * genuine RBAC denial - "missing or no access"), anything else -> `failed`.
+ */
+function statusForError(err) {
+  if (err?.status === 404) return 'missing'
+  if (err?.status === 403) return 'forbidden'
+  return 'failed'
+}
+
+/**
+ * Statuses downgraded from job-failure to a warning by `ignore-missing`: the
+ * app does not exist (404 `missing`) or ArgoCD masked a missing app as a 403
+ * (`forbidden`). `forbidden` is included because, without a `project`, ArgoCD
+ * returns 403 for a non-existent app - so covering only 404 would not catch the
+ * common case. The cost is that a genuine RBAC denial is tolerated too; the app
+ * is still reported, only the job-failure is suppressed.
+ */
+const tolerated = (r) => r.status === 'missing' || r.status === 'forbidden';
+
+/** The status buckets reported in the `summary` output, in display order. */
+const SUMMARY_STATUSES = ['updated', 'restarted', 'unchanged', 'missing', 'forbidden', 'failed'];
+
+/** Group application names by their result status into the `summary` object. */
+function summarize(results) {
+  const summary = Object.fromEntries(SUMMARY_STATUSES.map((s) => [s, []]));
+  for (const r of results) {
+(summary[r.status] || (summary[r.status] = [])).push(r.app);
+  }
+  return summary
 }
 
 async function run$5(client, app) {
@@ -30974,6 +31046,7 @@ async function run$5(client, app) {
   const apps = resolveAppNames(app, getInput('applications'));
   const parallel = parseBool(getInput('parallel'), true);
   const allowFailure = parseBool(getInput('allow-failure'), false);
+  const ignoreMissing = parseBool(getInput('ignore-missing'), false);
   // allow-failure forces fail-fast off, so every app is attempted and reported.
   const failFast = allowFailure ? false : parseBool(getInput('fail-fast'), true);
 
@@ -30984,6 +31057,7 @@ async function run$5(client, app) {
 
   const toError = (name, err) => ({
     app: name,
+    status: statusForError(err),
     error: err instanceof Error ? err.message : String(err)
   });
 
@@ -31000,8 +31074,11 @@ async function run$5(client, app) {
         results.push(await deployOne(client, name, settings));
       } catch (err) {
         error(`[${name}] ${err instanceof Error ? err.message : err}`);
-        results.push(toError(name, err));
-        if (failFast) break
+        const errored = toError(name, err);
+        results.push(errored);
+        // A tolerated (not-found) app under ignore-missing must not trip
+        // fail-fast and abort the rest of the batch.
+        if (failFast && !(ignoreMissing && tolerated(errored))) break
       }
     }
   }
@@ -31014,7 +31091,10 @@ async function run$5(client, app) {
   // its documented shape stays stable.
   setOutput('results', JSON.stringify(results.map(({ diffText, imageChanges: _i, ...r }) => r)));
   setOutput('outcome', outcome);
-  setOutput('failed', JSON.stringify(failures.map((f) => f.app)));
+  // `summary` groups names by status so a downstream step can render "updated /
+  // not found / forbidden / failed" without reparsing `results`. The names that
+  // did not deploy are the union of its missing/forbidden/failed buckets.
+  setOutput('summary', JSON.stringify(summarize(results)));
   // Convenience scalar outputs when deploying exactly one application.
   if (results.length === 1 && !results[0].error) {
     const r = results[0];
@@ -31026,15 +31106,27 @@ async function run$5(client, app) {
 
   await reportStatus(client, results, outcome);
 
-  if (failures.length > 0 && !allowFailure) {
+  // ignore-missing downgrades not-found / 403 apps to a warning; allow-failure
+  // (if set) tolerates every failure. Whatever remains is a hard failure that
+  // fails the job.
+  const ignored = ignoreMissing ? failures.filter(tolerated) : [];
+  const blocking = failures.filter((f) => !ignored.includes(f));
+
+  if (ignored.length > 0) {
+    warning(
+      `${ignored.length}/${apps.length} application(s) not found and ignored (ignore-missing): ` +
+        ignored.map((f) => f.app).join(', ')
+    );
+  }
+  if (blocking.length > 0 && !allowFailure) {
     throw new Error(
-      `Deploy failed for ${failures.length}/${apps.length} application(s): ` +
-        failures.map((f) => `${f.app}: ${f.error}`).join('; ')
+      `Deploy failed for ${blocking.length}/${apps.length} application(s): ` +
+        blocking.map((f) => `${f.app}: ${f.error}`).join('; ')
     )
   }
-  if (failures.length > 0) {
+  if (blocking.length > 0) {
     warning(
-      `${failures.length}/${apps.length} application(s) failed, but allow-failure is set - not failing the job.`
+      `${blocking.length}/${apps.length} application(s) failed, but allow-failure is set - not failing the job.`
     );
   }
 }
@@ -31044,6 +31136,13 @@ function resultLabel(action) {
   if (action === 'sync') return ok('Deployed')
   if (/^restart\(\d+\)$/.test(action)) return ok('Restarted')
   return ok('No change')
+}
+
+/** The Result-column label for a failed application, by its result status. */
+function errorLabel(status) {
+  if (status === 'missing') return fail('Not found')
+  if (status === 'forbidden') return fail('Forbidden')
+  return fail('Failed')
 }
 
 /**
@@ -31082,7 +31181,7 @@ async function reportStatus(client, results, outcome) {
 
   const rows = results.map((r) =>
     r.error
-      ? [appLink(r.app, client), fail('Failed'), '', '', escapeCell(r.error)]
+      ? [appLink(r.app, client), errorLabel(r.status), '', '', escapeCell(r.error)]
       : [
           appLink(r.app, client),
           resultLabel(r.action),

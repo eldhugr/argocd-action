@@ -157,6 +157,10 @@ inputs:
     description: 'Do not fail the job when some applications fail to deploy - still deploy the rest and report status. Implies fail-fast=false (command: deploy)'
     required: false
     default: 'false'
+  ignore-missing:
+    description: 'Do not fail the job for applications that do not exist - reported as `missing` (404) or, since ArgoCD v2.7, a masked `forbidden` (403, "missing or no access"). Both are still reported in `summary` and the step summary; only the job-failure is suppressed. Other failures (sync errors, timeouts) still fail the job (command: deploy)'
+    required: false
+    default: 'false'
 
   # --- rollback ---
   rollback-id:
@@ -177,11 +181,11 @@ outputs:
   history:
     description: 'JSON array of deployment history entries: {id, revision, deployedAt, ...} (command: get, history)'
   results:
-    description: 'JSON array of per-application deploy results: {app, diff, action, syncStatus, healthStatus, revision} or {app, error} (command: deploy)'
+    description: 'JSON array of per-application deploy results: {app, status, diff, action, syncStatus, healthStatus, revision, images} or {app, status, error}. `status` is one of updated | restarted | unchanged | missing | forbidden | failed (command: deploy)'
   outcome:
     description: '`success` (all deployed), `partial` (some failed), or `failure` (all failed) (command: deploy)'
-  failed:
-    description: 'JSON array of application names that failed to deploy (command: deploy)'
+  summary:
+    description: 'JSON object grouping application names by status: {updated, restarted, unchanged, missing, forbidden, failed}. `missing` is a definitive 404; `forbidden` is a 403, which ArgoCD returns both for a non-existent app and a real RBAC denial (command: deploy)'
 
 runs:
   using: 'node24'

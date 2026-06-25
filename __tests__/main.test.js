@@ -27,6 +27,7 @@ let baseUrl
 let interactions
 let appResponse // (name) => application object
 let managedResponse
+let appStatus // { [name]: httpStatus } -> make that app's endpoints fail
 
 const helmApp = (name) => ({
   metadata: { name, annotations: {} },
@@ -81,6 +82,14 @@ beforeAll(async () => {
       if (m) {
         const name = decodeURIComponent(m[1])
         const sub = m[2] || ''
+        // Simulate an app-level error status (e.g. 404 missing, 403 forbidden)
+        // on every endpoint for that app, so the first ArgoCD call fails.
+        if (appStatus[name]) {
+          res.writeHead(appStatus[name], { 'Content-Type': 'application/json' })
+          return res.end(
+            JSON.stringify({ message: appStatus[name] === 404 ? 'not found' : 'permission denied' })
+          )
+        }
         if (req.method === 'GET' && sub === '') return send(appResponse(name))
         if (req.method === 'PUT' && sub === '/spec') {
           interactions.puts.push({ name, spec: JSON.parse(body) })
@@ -129,6 +138,7 @@ beforeEach(() => {
   }
   appResponse = helmApp
   managedResponse = { items: [] }
+  appStatus = {}
 })
 
 /** Drive `core.getInput` from a plain map; unset inputs return ''. */
@@ -488,10 +498,10 @@ describe('deploy (failure handling)', () => {
 
     expect(core.setFailed).toHaveBeenCalled()
     expect(core.setOutput).toHaveBeenCalledWith('outcome', 'partial')
-    expect(core.setOutput).toHaveBeenCalledWith(
-      'failed',
-      JSON.stringify(['app.dev.comments'])
+    const summary = JSON.parse(
+      core.setOutput.mock.calls.find((c) => c[0] === 'summary')[1]
     )
+    expect(summary.failed).toEqual(['app.dev.comments'])
   })
 
   it('does not fail the job when allow-failure is on, and reports status', async () => {
@@ -548,6 +558,108 @@ describe('deploy (failure handling)', () => {
     expect(results.map((r) => r.app)).toEqual(['app.bad', 'app.good'])
     expect(results.find((r) => r.app === 'app.bad').error).toMatch(/boom/)
     expect(results.find((r) => r.app === 'app.good').error).toBeUndefined()
+  })
+
+  it('does not fail the job for a missing/forbidden app when ignore-missing is set', async () => {
+    appStatus = { 'app.gone': 403 } // ArgoCD masks a missing app as a 403
+    setInputs({
+      command: 'deploy',
+      server: baseUrl,
+      'auth-token': 'faketoken',
+      refresh: 'false',
+      timeout: '30',
+      'ignore-missing': 'true',
+      applications: JSON.stringify(['app.ok', 'app.gone'])
+    })
+
+    await run()
+
+    expect(core.setFailed).not.toHaveBeenCalled()
+    expect(core.warning).toHaveBeenCalledWith(expect.stringMatching(/ignore-missing/))
+    // The outcome stays honest - the app was not deployed - the job just isn't failed.
+    expect(core.setOutput).toHaveBeenCalledWith('outcome', 'partial')
+    const summary = JSON.parse(
+      core.setOutput.mock.calls.find((c) => c[0] === 'summary')[1]
+    )
+    expect(summary.forbidden).toEqual(['app.gone'])
+  })
+
+  it('still fails the job when a real failure accompanies an ignored missing app', async () => {
+    withFailingApp('app.bad') // a genuine operation failure -> status `failed`
+    appStatus = { 'app.gone': 404 }
+    setInputs({
+      command: 'deploy',
+      server: baseUrl,
+      'auth-token': 'faketoken',
+      refresh: 'false',
+      timeout: '30',
+      'ignore-missing': 'true',
+      applications: JSON.stringify(['app.gone', 'app.bad'])
+    })
+
+    await run()
+
+    // app.gone is tolerated, but app.bad is a hard failure -> the job fails.
+    expect(core.setFailed).toHaveBeenCalled()
+    expect(core.setOutput).toHaveBeenCalledWith('outcome', 'failure')
+  })
+})
+
+describe('deploy (status classification + summary)', () => {
+  it('classifies a 404 as missing and a 403 as forbidden, and groups them in summary', async () => {
+    managedResponse = sameItems() // good app -> no diff -> unchanged
+    appStatus = { 'app.gone': 404, 'app.denied': 403 }
+    setInputs({
+      command: 'deploy',
+      server: baseUrl,
+      'auth-token': 'faketoken',
+      refresh: 'false',
+      timeout: '30',
+      'allow-failure': 'true', // keep the job green so we can inspect the outputs
+      applications: JSON.stringify(['app.ok', 'app.gone', 'app.denied'])
+    })
+
+    await run()
+
+    expect(core.setFailed).not.toHaveBeenCalled()
+    expect(core.setOutput).toHaveBeenCalledWith('outcome', 'partial')
+
+    const results = JSON.parse(
+      core.setOutput.mock.calls.find((c) => c[0] === 'results')[1]
+    )
+    const byApp = Object.fromEntries(results.map((r) => [r.app, r]))
+    expect(byApp['app.ok'].status).toBe('unchanged')
+    expect(byApp['app.gone']).toMatchObject({ status: 'missing' })
+    expect(byApp['app.gone'].error).toMatch(/not found/)
+    expect(byApp['app.denied']).toMatchObject({ status: 'forbidden' })
+    expect(byApp['app.denied'].error).toMatch(/permission denied/)
+
+    const summary = JSON.parse(
+      core.setOutput.mock.calls.find((c) => c[0] === 'summary')[1]
+    )
+    expect(summary).toEqual({
+      updated: [],
+      restarted: [],
+      unchanged: ['app.ok'],
+      missing: ['app.gone'],
+      forbidden: ['app.denied'],
+      failed: []
+    })
+  })
+
+  it('groups a synced single app under summary.updated', async () => {
+    managedResponse = diffItems()
+    setInputs(baseInputs({ command: 'deploy', refresh: 'false', timeout: '30' }))
+
+    await run()
+
+    expect(core.setFailed).not.toHaveBeenCalled()
+    const summary = JSON.parse(
+      core.setOutput.mock.calls.find((c) => c[0] === 'summary')[1]
+    )
+    expect(summary.updated).toEqual([APP])
+    expect(summary.missing).toEqual([])
+    expect(summary.forbidden).toEqual([])
   })
 })
 

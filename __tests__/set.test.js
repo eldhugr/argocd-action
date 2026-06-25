@@ -113,6 +113,18 @@ describe('isSecretName', () => {
     }
   })
 
+  it('flags "auth" only as the leaf key, not an app/chart name segment', () => {
+    // basicAuth / oauth as the leaf still read as secret-like.
+    for (const name of ['app.basicAuth', 'service.oauth']) {
+      expect(isSecretName(name)).toBe(true)
+    }
+    // An "auth" carried by an ancestor segment (the app name) must not mask the
+    // commit SHA / ref - this was masking auth-web deploys everywhere in the job.
+    for (const name of ['auth-web.release.commitSHA', 'auth-web.release.refName', 'oauth-proxy.image.tag']) {
+      expect(isSecretName(name)).toBe(false)
+    }
+  })
+
   it('leaves ordinary parameter names visible', () => {
     for (const name of ['image.tag', 'replicaCount', 'ingress.host', 'comments.release.refName']) {
       expect(isSecretName(name)).toBe(false)

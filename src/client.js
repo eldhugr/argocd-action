@@ -30,6 +30,24 @@ function isIdempotent(method) {
   return method === 'GET' || method === 'PUT' || method === 'DELETE' || method === 'HEAD'
 }
 
+/**
+ * Error thrown for a non-ok ArgoCD API response. Carries the HTTP `status` so
+ * callers can classify a failure without parsing the message string - notably
+ * the deploy command, which maps 404 -> the application does not exist and
+ * 403 -> ArgoCD's "permission denied". Note that since ArgoCD v2.7 a GET for a
+ * non-existent application returns 403 (intentional masking to avoid leaking
+ * which apps exist), so a 403 means "missing or no access", not a clean 404.
+ */
+export class ArgoApiError extends Error {
+  constructor(message, { status, method, path } = {}) {
+    super(message)
+    this.name = 'ArgoApiError'
+    this.status = status
+    this.method = method
+    this.path = path
+  }
+}
+
 function isRetryableStatus(status, idempotent) {
   if (ALWAYS_RETRY_STATUS.has(status)) return true
   return idempotent && status === 500
@@ -254,7 +272,10 @@ export class ArgoClient {
       } catch {
         // keep raw text
       }
-      throw new Error(`ArgoCD API ${method} ${path} failed (${res.status}): ${message}`)
+      throw new ArgoApiError(
+        `ArgoCD API ${method} ${path} failed (${res.status}): ${message}`,
+        { status: res.status, method, path }
+      )
     }
     return text ? JSON.parse(text) : {}
   }

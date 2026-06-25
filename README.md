@@ -166,24 +166,40 @@ connections to the ArgoCD gateway; the rest wait their turn. Set `parallel:
   failures are reported rather than aborting the step. With it off (default), the
   step fails if any application fails - `fail-fast` then controls whether the
   sequential run stops at the first failure or attempts the rest first.
+- **`ignore-missing: true`** is the narrower escape hatch: applications that do
+  not exist (`missing`, or the `forbidden` 403 ArgoCD returns for a masked
+  missing app) are downgraded to a warning instead of failing the job, while real
+  deploy failures (sync errors, timeouts) still fail it. The tolerated apps stay
+  in `summary`/`failed` and the step summary, and they do not trip `fail-fast`.
+  Use it for app lists that legitimately span not-yet-created apps. Note it also
+  tolerates a genuine permission denial, since a 403 is indistinguishable from a
+  missing app without the app's project.
 - **Status report** - a per-application table (result, sync, health, and a details
   column) is written to the **GitHub step summary**, and logged with ✓/✗ markers.
-  The result says what happened - `Deployed`, `Restarted`, `No change`, or `Failed`.
-  The application name links to its ArgoCD page. On success the details column
-  shows the container image transition (`old -> new`, shortened to `basename:tag`)
-  when an image changed, otherwise the running image(s) (first + `(+N)`); on
-  failure it holds the reason, taken from the app's operation message, conditions,
-  and any non-Healthy resources.
+  The result says what happened - `Deployed`, `Restarted`, `No change`, `Not found`,
+  `Forbidden`, or `Failed`. The application name links to its ArgoCD page. On
+  success the details column shows the container image transition (`old -> new`,
+  shortened to `basename:tag`) when an image changed, otherwise the running
+  image(s) (first + `(+N)`); on failure it holds the reason, taken from the app's
+  operation message, conditions, and any non-Healthy resources.
 - **Outputs** for downstream steps:
-  - `results` - JSON array of `{ app, diff, action, syncStatus, healthStatus, revision, images }`, or `{ app, error }` for failures.
+  - `results` - JSON array of `{ app, status, diff, action, syncStatus, healthStatus, revision, images }`, or `{ app, status, error }` for failures. `status` is one of `updated` | `restarted` | `unchanged` | `missing` | `forbidden` | `failed`.
+  - `summary` - JSON object grouping application names by status: `{ updated, restarted, unchanged, missing, forbidden, failed }`. Lets a downstream step render "updated / not found / forbidden / failed" without reparsing `results`; the apps that did not deploy are the union of its `missing`, `forbidden` and `failed` buckets.
   - `outcome` - `success` | `partial` | `failure`.
-  - `failed` - JSON array of the application names that failed.
   - A single-app `deploy` also sets the scalar `diff` / `sync-status` / `health-status` / `revision`.
+
+  > **`missing` vs `forbidden`.** `missing` is a definitive `404` - the app does
+  > not exist. `forbidden` is a `403`, which ArgoCD returns **both** for a
+  > non-existent application (intentional masking since v2.7, to avoid leaking
+  > which apps exist) **and** for a genuine RBAC denial - so treat it as "missing
+  > or no access". A `403` cannot be told apart from a plain GET; passing the
+  > app's `project` makes ArgoCD return a clean `404` for a truly missing app.
 
 ```yaml
 - if: ${{ steps.deploy.outputs.outcome != 'success' }}
   run: |
-    echo "Failed: ${{ steps.deploy.outputs.failed }}"
+    echo "Failed: ${{ fromJSON(steps.deploy.outputs.summary).failed }}"
+    echo "Missing: ${{ fromJSON(steps.deploy.outputs.summary).missing }}"
 ```
 
 > Please note that the restart/sync branch mirrors the shell `&&`/`||` exactly **except** the rare
@@ -573,6 +589,7 @@ source type; they target the same selected source for multi-source apps.
 | `parallel`      | `true` \| `false`                | `true`  | Deploy multiple apps concurrently, max 8 at a time (`false` = one-at-a-time)    |
 | `fail-fast`     | `true` \| `false`                | `true`  | Stop after the first failure (sequential); ignored with `allow-failure`         |
 | `allow-failure` | `true` \| `false`                | `false` | Don't fail the job on app failures; deploy the rest. Implies `fail-fast: false` |
+| `ignore-missing`| `true` \| `false`                | `false` | Don't fail the job for apps that don't exist (`missing`/`forbidden`); still reported. Real failures (sync, timeout) still fail |
 
 ## Outputs
 
@@ -584,9 +601,9 @@ source type; they target the same selected source for multi-source apps.
 | `revision`      | synced revision                                             |
 | `images`        | (`get`) JSON array of deployed container images             |
 | `history`       | (`get`, `history`) JSON array of deployment history entries |
-| `results`       | (`deploy`) JSON array of per-application results            |
+| `results`       | (`deploy`) JSON array of per-application results, each with a `status` |
+| `summary`       | (`deploy`) JSON object of app names by status: `updated`, `restarted`, `unchanged`, `missing`, `forbidden`, `failed` |
 | `outcome`       | (`deploy`) `success` \| `partial` \| `failure`              |
-| `failed`        | (`deploy`) JSON array of application names that failed      |
 
 ## How diffing works
 
