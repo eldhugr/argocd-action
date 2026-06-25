@@ -282,7 +282,7 @@ data `rollback` resolves ids from); `terminate-op` cancels a stuck sync.
 
 Credentials are resolved from inputs first, then the standard `ARGOCD_*`
 environment variables (so existing workflow `env:` blocks keep working). The
-method is set by `auth-method`, or inferred when it is unset:
+method is chosen by `auth-method`, one of:
 
 | method     | credentials                                                   | notes                                 |
 |------------|---------------------------------------------------------------|---------------------------------------|
@@ -290,8 +290,8 @@ method is set by `auth-method`, or inferred when it is unset:
 | `password` | `username`+`password` / `$ARGOCD_USERNAME`+`$ARGOCD_PASSWORD` | Logs in via `POST /api/v1/session`.   |
 | `oidc`     | none - minted per run                                         | GitHub OIDC federation.               |
 
-When `auth-method` is unset it is inferred: token -> password -> OIDC (if the job
-can mint an ID token).
+When `auth-method` is unset, it is inferred from the credentials present, in the
+order token -> password -> OIDC (OIDC only if the job can mint an ID token).
 
 ### OIDC token federation
 
@@ -330,7 +330,7 @@ That is the whole client side - no `ARGOCD_AUTH_TOKEN` secret. What happens per 
 4. The action uses that `access_token` as the Bearer for the rest of the run.
    Nothing long-lived is stored anywhere.
 
-For this to succeed, an ArgoCD operator wires up two things once: a Dex connector
+For this to succeed, an ArgoCD operator wires up two things at once: a Dex connector
 that trusts GitHub as an issuer, and RBAC that grants the workflow's identity the
 verbs it needs.
 
@@ -416,7 +416,7 @@ the subject as an exact string. To let **every repo in an org** (on any branch,
 tag, or PR) use the action without enumerating subjects, map a stable claim to an
 ArgoCD **group** and write the policy against the group instead.
 
-GitHub's ID token carries a `repository_owner` claim (the org/user name). Surface
+GitHub's ID token carries a `repository_owner` claim (the org/username). Surface
 it as a group by adding `claimMapping` to the connector from step 1:
 
 ```yaml
@@ -453,6 +453,17 @@ p, my-org, applications, override, */*, allow
 p, my-org, applications, action/*, */*, allow
 ```
 
+Or, alternatively:
+```
+p, role:deployer, applications, get,      */*, allow
+p, role:deployer, applications, sync,     */*, allow
+p, role:deployer, applications, update,   */*, allow
+p, role:deployer, applications, override, */*, allow
+p, role:deployer, applications, action/*, */*, allow
+
+g, my-org, role:deployer
+```
+
 - **Blast radius** - this trusts every workflow in every org repo, on any ref, to
   act on every app (`*/*`). Scope the object to a project (`<project>/*`) and drop
   unused verbs to contain it.
@@ -468,7 +479,7 @@ p, my-org, applications, action/*, */*, allow
 
 Override `oidc-client-id` (default `argo-cd-cli`) or `oidc-connector-id` (default
 `github-actions`) if your server uses different values. `oidc-audience` sets the
-audience of the minted GitHub token; it is rarely needed, because Dex does not
+audience of the minted GitHub token; it is rarely necessary, because Dex does not
 verify the audience during the token exchange - set it only if something in front
 of your ArgoCD server (a proxy or gateway) requires a specific `aud`.
 
