@@ -158,7 +158,7 @@ export class ArgoClient {
     const params = new URLSearchParams({
       connector_id: connectorId,
       grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
-      scope: 'openid email profile federated:id',
+      scope: 'openid email profile groups federated:id',
       requested_token_type: 'urn:ietf:params:oauth:token-type:access_token',
       subject_token: idToken,
       subject_token_type: 'urn:ietf:params:oauth:token-type:id_token'

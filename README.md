@@ -349,7 +349,7 @@ connectors:
     id: github-actions                 # must match the action's `oidc-connector-id` input (which defaults to `github-actions`)
     name: GitHub Actions
     config:
-      issuer: https://token.actions.githubusercontent.com/
+      issuer: https://token.actions.githubusercontent.com
       scopes:
         - openid
       userNameKey: sub                  # the RBAC subject is the token's `sub` claim
@@ -425,18 +425,21 @@ connectors:
     id: github-actions
     name: GitHub Actions
     config:
-      issuer: https://token.actions.githubusercontent.com/
+      issuer: https://token.actions.githubusercontent.com
       scopes:
         - openid
       userNameKey: sub
       insecureSkipEmailVerified: true
+      insecureEnableGroups: true
       claimMapping:
         groups: repository_owner   # every repo under the org shares this group
 ```
 
-`repository_owner` is a single string rather than a list. Dex wraps a scalar
-`groups` claim into a one-element group automatically, so the group ends up named
-after the org (`my-org`).
+`insecureEnableGroups: true` is mandatory - the Dex OIDC connector ignores
+`claimMapping.groups` (and emits no `groups` claim at all) unless it is set, so
+without it the group policy below never matches. `repository_owner` is a single
+string rather than a list; Dex wraps a scalar `groups` claim into a one-element
+group automatically, so the group ends up named after the org (`my-org`).
 
 Then grant the group in `policy.csv`. ArgoCD checks policies against the subject
 **and** every group, so the verbs are identical to (2) - only the subject changes
