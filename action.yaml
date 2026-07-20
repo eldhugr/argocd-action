@@ -137,7 +137,7 @@ inputs:
     required: false
     default: 'true'
   fail-on-rollout-failure:
-    description: 'Fail fast when a rollout cannot recover, instead of waiting out the timeout. Requires wait-for-health (a sync-only wait does not check rollout health) and only fires once the sync operation has settled. Aborts on an app whose health is Degraded (debounced over a couple of polls, so a stale post-sync snapshot or a momentary blip does not trip it), and on a managed Pod stuck in an unrecoverable state (ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CrashLoopBackOff, ...) - the latter catches the failure before the app itself goes Degraded. Image/config faults abort after a couple of polls; crash-loops are debounced longer to ride out a slow start. Best-effort: a resource-tree read error just skips the pod check for that poll (command: wait, deploy)'
+    description: 'Fail fast when a rollout cannot recover, instead of waiting out the timeout. Requires wait-for-health (a sync-only wait does not check rollout health) and only fires once the sync operation has settled. Aborts on an app whose health is Degraded (debounced over a couple of polls, so a stale post-sync snapshot or a momentary blip does not trip it), and on a managed Pod stuck in an unrecoverable state (ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CrashLoopBackOff, ...) - the latter catches the failure before the app itself goes Degraded. Image/config faults abort after a couple of polls; crash-loops are debounced longer to ride out a slow start. Best-effort: a resource-tree read error just skips the pod check for that poll (command: wait, deploy, sync, rollback)'
     required: false
     default: 'true'
 

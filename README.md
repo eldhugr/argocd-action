@@ -573,6 +573,7 @@ source type; they target the same selected source for multi-source apps.
 | `unified-diff`                                             | `true` \| `false`             | `false`  | (`diff`, `deploy`) show field-level `+`/`-` diff values (in the `diff` summary and both commands' job log) |
 | `timeout`                                                  | seconds (integer)             | `600`    | Max time to wait for Synced/Healthy                                                                        |
 | `wait-for-sync` / `wait-for-health` / `wait-for-operation` | `true` \| `false`             | `true`   | Conditions to wait on                                                                                      |
+| `fail-on-rollout-failure`                                  | `true` \| `false`             | `true`   | (`wait`, `deploy`, `sync`, `rollback`) fail fast when a rollout cannot recover (`Degraded` app, or a Pod stuck in `ImagePullBackOff`/`CrashLoopBackOff`/…) instead of waiting out the timeout; requires `wait-for-health` |
 
 ### Rollback - `rollback`
 

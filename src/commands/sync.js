@@ -163,6 +163,7 @@ export async function run(client, app) {
     forSync: parseBool(core.getInput('wait-for-sync'), true),
     forHealth: parseBool(core.getInput('wait-for-health'), true),
     forOperation: parseBool(core.getInput('wait-for-operation'), true),
+    failOnRolloutFailure: parseBool(core.getInput('fail-on-rollout-failure'), true),
     refresh: 'normal'
   })
   core.setOutput('sync-status', status.syncStatus)

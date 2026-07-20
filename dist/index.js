@@ -30966,6 +30966,7 @@ async function run$6(client, app) {
     forSync: parseBool(getInput('wait-for-sync'), true),
     forHealth: parseBool(getInput('wait-for-health'), true),
     forOperation: parseBool(getInput('wait-for-operation'), true),
+    failOnRolloutFailure: parseBool(getInput('fail-on-rollout-failure'), true),
     refresh: 'normal'
   });
   setOutput('sync-status', status.syncStatus);
@@ -31482,6 +31483,7 @@ async function run$3(client, app) {
     forSync: parseBool(getInput('wait-for-sync'), true),
     forHealth: parseBool(getInput('wait-for-health'), true),
     forOperation: parseBool(getInput('wait-for-operation'), true),
+    failOnRolloutFailure: parseBool(getInput('fail-on-rollout-failure'), true),
     refresh: 'normal'
   });
   setOutput('sync-status', status.syncStatus);
