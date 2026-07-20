@@ -51,7 +51,8 @@ function readSettings() {
     unified: parseBool(core.getInput('unified-diff'), false),
     forSync: parseBool(core.getInput('wait-for-sync'), true),
     forHealth: parseBool(core.getInput('wait-for-health'), true),
-    forOperation: parseBool(core.getInput('wait-for-operation'), true)
+    forOperation: parseBool(core.getInput('wait-for-operation'), true),
+    failOnRolloutFailure: parseBool(core.getInput('fail-on-rollout-failure'), true)
   }
 }
 
@@ -183,6 +184,7 @@ async function deployOne(client, app, settings) {
     forSync: settings.forSync,
     forHealth: settings.forHealth,
     forOperation: settings.forOperation,
+    failOnRolloutFailure: settings.failOnRolloutFailure,
     refresh: result.action !== 'none' ? settings.refresh : undefined,
     log
   })

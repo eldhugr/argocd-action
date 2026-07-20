@@ -29751,6 +29751,16 @@ class ArgoClient {
     return this.request('GET', `/applications/${encodeURIComponent(name)}/managed-resources`)
   }
 
+  /**
+   * Fetch the live resource tree of an application: every managed resource plus
+   * its descendants (ReplicaSets, Pods, ...) with per-node health. Mirrors
+   * `argocd app resources`/the UI tree, and is what the deploy/wait pod
+   * fail-fast reads to spot Pods stuck in ImagePullBackOff/CrashLoopBackOff etc.
+   */
+  getResourceTree(name) {
+    return this.request('GET', `/applications/${encodeURIComponent(name)}/resource-tree`)
+  }
+
   sync(name, body = {}) {
     const payload = { name, ...body };
     if (this.appNamespace) payload.appNamespace = this.appNamespace;
@@ -30488,12 +30498,98 @@ function evaluate(app, { forSync, forHealth, forOperation }) {
     syncStatus,
     healthStatus,
     opPhase,
+    operationPending,
     done: reasons.length === 0,
     reasons,
     operationFailed,
     healthDegraded,
     operationMessage: status.operationState?.message
   }
+}
+
+/**
+ * Container "waiting"/pod reasons that mean a Pod will not start on its own,
+ * mapped to how aggressively the wait aborts. `image`/`config` faults never
+ * self-heal without a new push or a manifest fix, so they trip after a couple
+ * of polls; `crash` (CrashLoopBackOff) is debounced longer, since a slowly
+ * initialising container can flap through it before it settles.
+ */
+const POD_FAIL_REASONS = {
+  ImagePullBackOff: 'image',
+  ErrImagePull: 'image',
+  InvalidImageName: 'image',
+  ErrImageNeverPull: 'image',
+  CreateContainerConfigError: 'config',
+  CreateContainerError: 'config',
+  RunContainerError: 'config',
+  CrashLoopBackOff: 'crash'
+};
+
+/** Consecutive polls a fault class must persist before it aborts the wait. */
+const POD_FAIL_THRESHOLD = { image: 2, config: 2, crash: 3 };
+
+/**
+ * Consecutive polls the app must stay `Degraded` before the wait aborts. The
+ * debounce rides out a stale/lagging snapshot: right after a sync/restart the
+ * API can briefly echo the *previous* deploy's Degraded state (informer lag)
+ * before the new operation registers, and a bare `wait` may catch an app
+ * mid-recovery.
+ */
+const DEGRADED_POLL_THRESHOLD = 2;
+
+/**
+ * How often (ms) the pod fail-fast fetches the (potentially large) resource
+ * tree, throttled well below the poll interval so a long but healthy rollout
+ * does not pull the whole tree on every poll. The first fetch is delayed by
+ * this much as well, so a quick clean rollout that reaches Healthy first never
+ * fetches the tree at all. A stuck rollout is still caught far inside the
+ * timeout: image/config faults abort ~2 intervals after this delay.
+ */
+const POD_CHECK_INTERVAL_MS = 15000;
+
+/**
+ * Inspect one resource-tree node and, when it is a Pod stuck in an
+ * unrecoverable state, return `{reason, cls}`. The reason keyword is matched
+ * against every `info` value and the health message - ArgoCD surfaces
+ * "ImagePullBackOff" et al. in one or the other depending on version, so we do
+ * not depend on a single field name. A `Degraded` Pod with no recognised reason
+ * falls back to the debounced `crash` class, but only when it is actually
+ * restarting (see below) rather than terminal-but-replaced.
+ */
+function podFailureReason(node) {
+  if (node?.kind !== 'Pod') return null
+  const info = node.info || [];
+  const haystacks = info.map((i) => i && i.value).filter(Boolean).map(String);
+  if (node.health?.message) haystacks.push(String(node.health.message));
+  for (const [reason, cls] of Object.entries(POD_FAIL_REASONS)) {
+    if (haystacks.some((h) => h.includes(reason))) return { reason, cls }
+  }
+  // No named reason, but ArgoCD still calls the Pod Degraded (e.g. a container
+  // terminated with a non-zero exit, or OOMKilled). Only treat it as a failure
+  // when the container is genuinely restarting - a positive "Restart Count".
+  // That excludes terminal-but-replaced pods (Evicted, preempted, node-lost)
+  // that the controller simply recreates: those linger in the tree as Degraded
+  // with zero restarts and would otherwise be a phantom, never-clearing abort.
+  // A genuinely stuck rollout with no restarts is still caught by the app-level
+  // `Degraded` health check, just not as early.
+  if (node.health?.status === 'Degraded') {
+    const restarts = Number(info.find((i) => i?.name === 'Restart Count')?.value);
+    if (restarts > 0) {
+      const statusReason = info.find((i) => i?.name === 'Status Reason')?.value;
+      return { reason: statusReason || node.health.message || 'Degraded', cls: 'crash' }
+    }
+  }
+  return null
+}
+
+/** Collect every Pod node in the resource tree that is in an unrecoverable state. */
+function findPodFailures(tree) {
+  const failures = [];
+  for (const node of tree?.nodes || []) {
+    const f = podFailureReason(node);
+    if (f) failures.push({ name: node.name, reason: f.reason, cls: f.cls });
+  }
+  return failures
 }
 
 /**
@@ -30529,14 +30625,24 @@ async function waitForApp(client, app, {
   forSync = true,
   forHealth = true,
   forOperation = true,
+  failOnRolloutFailure = true,
   refresh,
   intervalMs = 3000,
+  podCheckIntervalMs = POD_CHECK_INTERVAL_MS,
   log = info,
   onPoll
 } = {}) {
   const deadline = Date.now() + timeoutSeconds * 1000;
   let lastSummary = '';
   let firstPoll = true;
+  // Pod name -> {reason, cls, count} of consecutive polls a fault has persisted,
+  // for the debounce in the pod fail-fast below.
+  let podSeen = new Map();
+  // Consecutive polls the app has been `Degraded`, for the debounce below.
+  let degradedPolls = 0;
+  // Timestamp of the last resource-tree fetch, to throttle it below the poll
+  // interval. Seeded to now so the first fetch waits one podCheckIntervalMs.
+  let lastPodCheck = Date.now();
 
   for (;;) {
     const application = await client.getApp(app, firstPoll && refresh && refresh !== 'false' ? { refresh } : {});
@@ -30566,10 +30672,62 @@ async function waitForApp(client, app, {
       return status
     }
 
-    if (ev.operationFailed || ev.healthDegraded) {
+    // A finished-but-failed operation is a reliable terminal signal, so abort
+    // at once.
+    if (ev.operationFailed) {
       const detail = describeProblems(application).join('; ') || ev.operationMessage || ev.opPhase;
-      const cause = ev.healthDegraded ? `Rollout Degraded for ${app}` : `Operation failed for ${app}`;
-      throw new Error(`${cause}: ${detail}`)
+      throw new Error(`Operation failed for ${app}: ${detail}`)
+    }
+
+    // A `Degraded` rollout is aborted too, but debounced - the health can be a
+    // stale post-sync snapshot or a momentary blip (see DEGRADED_POLL_THRESHOLD).
+    // ev.healthDegraded already resets to false while an operation is pending,
+    // so a fresh sync clears the counter.
+    degradedPolls = failOnRolloutFailure && ev.healthDegraded ? degradedPolls + 1 : 0;
+    if (degradedPolls >= DEGRADED_POLL_THRESHOLD) {
+      const detail = describeProblems(application).join('; ') || ev.operationMessage || ev.opPhase;
+      throw new Error(`Rollout Degraded for ${app}: ${detail}`)
+    }
+
+    // Fail fast on a Pod that cannot start (bad image, missing config, crash
+    // loop). For a Deployment such a Pod keeps the app "Progressing" right up to
+    // progressDeadlineSeconds, so watching the resource tree catches it far
+    // sooner. Like the `Degraded` check above this only applies when we are
+    // actually waiting for health - a sync-only wait does not care about pod
+    // readiness. Gated further to keep the (potentially large) tree fetch cheap:
+    // only once the sync operation has settled (pods churn during it), never
+    // while the app is already Healthy (nothing to find), and at most every
+    // podCheckIntervalMs rather than every poll. Best-effort: a tree-fetch error
+    // just skips the check this poll. The per-pod counter debounces blips.
+    if (
+      failOnRolloutFailure &&
+      forHealth &&
+      !ev.operationPending &&
+      ev.healthStatus !== 'Healthy' &&
+      Date.now() - lastPodCheck >= podCheckIntervalMs
+    ) {
+      lastPodCheck = Date.now();
+      let tree;
+      try {
+        tree = await client.getResourceTree(app);
+      } catch (err) {
+        log(`Skipping pod fail-fast this poll (resource tree unavailable: ${err instanceof Error ? err.message : err}).`);
+      }
+      if (tree) {
+        const next = new Map();
+        for (const f of findPodFailures(tree)) {
+          const prev = podSeen.get(f.name);
+          const count = prev && prev.reason === f.reason ? prev.count + 1 : 1;
+          next.set(f.name, { reason: f.reason, cls: f.cls, count });
+        }
+        podSeen = next;
+        const tripped = [...next.entries()].find(([, v]) => v.count >= (POD_FAIL_THRESHOLD[v.cls] || 3));
+        if (tripped) {
+          const [podName, v] = tripped;
+          const detail = describeProblems(application).join('; ');
+          throw new Error(`Pod ${podName} for ${app} is not starting: ${v.reason}${detail ? ` - ${detail}` : ''}.`)
+        }
+      }
     }
 
     if (Date.now() >= deadline) {
@@ -30589,6 +30747,7 @@ async function run$7(client, app) {
       forSync: parseBool(getInput('wait-for-sync'), true),
       forHealth: parseBool(getInput('wait-for-health'), true),
       forOperation: parseBool(getInput('wait-for-operation'), true),
+      failOnRolloutFailure: parseBool(getInput('fail-on-rollout-failure'), true),
       refresh: getInput('refresh'),
       onPoll: (s) => {
         setOutput('sync-status', s.syncStatus);
@@ -30866,7 +31025,8 @@ function readSettings() {
     unified: parseBool(getInput('unified-diff'), false),
     forSync: parseBool(getInput('wait-for-sync'), true),
     forHealth: parseBool(getInput('wait-for-health'), true),
-    forOperation: parseBool(getInput('wait-for-operation'), true)
+    forOperation: parseBool(getInput('wait-for-operation'), true),
+    failOnRolloutFailure: parseBool(getInput('fail-on-rollout-failure'), true)
   }
 }
 
@@ -30998,6 +31158,7 @@ async function deployOne(client, app, settings) {
     forSync: settings.forSync,
     forHealth: settings.forHealth,
     forOperation: settings.forOperation,
+    failOnRolloutFailure: settings.failOnRolloutFailure,
     refresh: result.action !== 'none' ? settings.refresh : undefined,
     log
   });

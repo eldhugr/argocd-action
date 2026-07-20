@@ -298,6 +298,16 @@ export class ArgoClient {
     return this.request('GET', `/applications/${encodeURIComponent(name)}/managed-resources`)
   }
 
+  /**
+   * Fetch the live resource tree of an application: every managed resource plus
+   * its descendants (ReplicaSets, Pods, ...) with per-node health. Mirrors
+   * `argocd app resources`/the UI tree, and is what the deploy/wait pod
+   * fail-fast reads to spot Pods stuck in ImagePullBackOff/CrashLoopBackOff etc.
+   */
+  getResourceTree(name) {
+    return this.request('GET', `/applications/${encodeURIComponent(name)}/resource-tree`)
+  }
+
   sync(name, body = {}) {
     const payload = { name, ...body }
     if (this.appNamespace) payload.appNamespace = this.appNamespace
