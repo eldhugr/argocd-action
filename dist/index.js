@@ -30477,6 +30477,13 @@ function evaluate(app, { forSync, forHealth, forOperation }) {
   const operationFailed =
     forOperation && (opPhase === 'Failed' || opPhase === 'Error') && !app.operation;
 
+  // Fail fast: `Degraded` means Kubernetes/ArgoCD has given up on the rollout
+  // (e.g. a Deployment past its progressDeadlineSeconds, or a failing resource
+  // health check) - it will not recover within this deploy, so don't burn the
+  // rest of the timeout. Guarded on no in-flight operation, since a queued or
+  // running sync may still flip the app back to Progressing.
+  const healthDegraded = forHealth && healthStatus === 'Degraded' && !operationPending;
+
   return {
     syncStatus,
     healthStatus,
@@ -30484,6 +30491,7 @@ function evaluate(app, { forSync, forHealth, forOperation }) {
     done: reasons.length === 0,
     reasons,
     operationFailed,
+    healthDegraded,
     operationMessage: status.operationState?.message
   }
 }
@@ -30558,9 +30566,10 @@ async function waitForApp(client, app, {
       return status
     }
 
-    if (ev.operationFailed) {
+    if (ev.operationFailed || ev.healthDegraded) {
       const detail = describeProblems(application).join('; ') || ev.operationMessage || ev.opPhase;
-      throw new Error(`Operation failed for ${app}: ${detail}`)
+      const cause = ev.healthDegraded ? `Rollout Degraded for ${app}` : `Operation failed for ${app}`;
+      throw new Error(`${cause}: ${detail}`)
     }
 
     if (Date.now() >= deadline) {
